@@ -35,6 +35,7 @@ class TopicRequest(BaseModel):
 class TopicResponse(BaseModel):
     topic: str
     category: str
+    difficulty: Optional[str] = "Medium"
     instant_start: Optional[bool] = False
     preparation_mode: Optional[bool] = False
     skip_preparation: Optional[bool] = False
@@ -128,22 +129,48 @@ class ReportSchema(BaseModel):
     class Config:
         from_attributes = True
 
+class DebateSessionSchema(BaseModel):
+    opponent_difficulty: str
+    opponent_argument: Optional[str] = None
+    argument_quality_score: Optional[int] = None
+    persuasion_score: Optional[int] = None
+    logical_consistency_score: Optional[int] = None
+    confidence_score: Optional[int] = None
+    rebuttal_score: Optional[int] = None
+    communication_score: Optional[int] = None
+    eye_contact_percentage: Optional[float] = None
+    speaking_speed_wpm: Optional[int] = None
+    clarity_score: Optional[int] = None
+    vocabulary_score: Optional[int] = None
+    scorecard: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
+
 class SessionOut(BaseModel):
     id: str
     user_id: str
     session_type: str
     topic: str
     category: str
+    difficulty: Optional[str] = "Medium"
     video_url: Optional[str] = None
+    analysis_status: Optional[str] = "pending"  # pending | processing | completed | failed
+    status: Optional[str] = "pending"
+    progress: Optional[int] = 0
+    message: Optional[str] = ""
     instant_start: Optional[bool] = False
     preparation_mode: Optional[bool] = False
     skip_preparation: Optional[bool] = False
+    final_score: Optional[int] = 0
     created_at: datetime
     transcript: Optional[TranscriptSchema] = None
     dna: Optional[CommunicationDNASchema] = None
     voice_metrics: Optional[VoiceMetricsSchema] = None
     face_metrics: Optional[FaceMetricsSchema] = None
     reports: Optional[List[ReportSchema]] = []
+    debate_session: Optional[DebateSessionSchema] = None
+    session_metadata: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True
@@ -153,9 +180,12 @@ class JAMSessionHistoryItem(BaseModel):
     id: str
     topic: str
     category: str
+    difficulty: Optional[str] = "Medium"
     session_type: str
     created_at: datetime
+    final_score: Optional[int] = 0
     overall_score: Optional[int] = 0
+    status: Optional[str] = "completed"
 
 class LeaderboardEntry(BaseModel):
     rank: int
@@ -304,6 +334,10 @@ class DocumentSessionOut(BaseModel):
     video_url: Optional[str] = None
     raw_transcript: Optional[str] = None
     corrected_transcript: Optional[str] = None
+    analysis_status: Optional[str] = "pending"
+    status: Optional[str] = "pending"
+    progress: Optional[int] = 0
+    message: Optional[str] = ""
     instant_start: Optional[bool] = False
     preparation_mode: Optional[bool] = False
     skip_preparation: Optional[bool] = False

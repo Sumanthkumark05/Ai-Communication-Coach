@@ -9,34 +9,98 @@ console.log(`[API] Base URL configured as: ${API_BASE}`);
 
 export function setToken(token: string) {
   if (typeof window !== "undefined") {
-    localStorage.setItem("jam_token", token);
+    if (!token || token === "undefined" || token === "null") {
+      localStorage.removeItem("access_token");
+      console.log("Token Cleared");
+      return;
+    }
+    let sanitizedToken = token;
+    if (sanitizedToken.startsWith('"') && sanitizedToken.endsWith('"')) {
+      sanitizedToken = sanitizedToken.slice(1, -1);
+    } else if (sanitizedToken.startsWith("'") && sanitizedToken.endsWith("'")) {
+      sanitizedToken = sanitizedToken.slice(1, -1);
+    }
+    localStorage.setItem("access_token", sanitizedToken);
+    console.log("Token Stored");
   }
+}
+
+function isTokenExpired(token: string): boolean {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return true;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    if (payload.exp) {
+      const currentTime = Math.floor(Date.now() / 1000);
+      return payload.exp < currentTime;
+    }
+  } catch (e) {
+    return true;
+  }
+  return false;
 }
 
 export function getToken(): string | null {
   if (typeof window !== "undefined") {
-    return localStorage.getItem("jam_token");
+    let token = localStorage.getItem("access_token");
+    if (token) {
+      if (token === "undefined" || token === "null" || token.trim() === "") {
+        localStorage.removeItem("access_token");
+        return null;
+      }
+      if (token.startsWith('"') && token.endsWith('"')) {
+        token = token.slice(1, -1);
+      } else if (token.startsWith("'") && token.endsWith("'")) {
+        token = token.slice(1, -1);
+      }
+      
+      if (isTokenExpired(token)) {
+        localStorage.removeItem("access_token");
+        console.log("Expired token detected locally and cleared");
+        return null;
+      }
+      
+      console.log("Token Loaded");
+      return token;
+    }
   }
   return null;
 }
 
 export function logout() {
   if (typeof window !== "undefined") {
-    localStorage.removeItem("jam_token");
+    localStorage.removeItem("access_token");
   }
 }
 
-async function fetchAPI(endpoint: string, options: RequestInit & { timeout?: number } = {}) {
+const inFlightRequests = new Map<string, Promise<any>>();
+
+async function fetchRaw(endpoint: string, options: RequestInit & { timeout?: number } = {}) {
   const { timeout, ...fetchOptions } = options;
   const token = getToken();
-  const headers = new Headers(fetchOptions.headers || {});
+  
+  // Construct plain object headers to ensure safe serialization
+  const headers: Record<string, string> = {};
+  if (fetchOptions.headers) {
+    if (fetchOptions.headers instanceof Headers) {
+      fetchOptions.headers.forEach((value, key) => {
+        headers[key] = value;
+      });
+    } else if (Array.isArray(fetchOptions.headers)) {
+      fetchOptions.headers.forEach(([key, value]) => {
+        headers[key] = value;
+      });
+    } else {
+      Object.assign(headers, fetchOptions.headers);
+    }
+  }
 
-  if (token && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${token}`);
+  if (token && !headers["Authorization"]) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
 
   const controller = new AbortController();
-  const timeoutMs = timeout ?? 15000;
+  const timeoutMs = timeout ?? 120000; // Increased to 120 seconds default
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   const fullUrl = `${API_BASE}${endpoint}`;
@@ -64,10 +128,9 @@ async function fetchAPI(endpoint: string, options: RequestInit & { timeout?: num
       console.error(msg);
       throw new Error(`Request timed out after ${timeoutMs / 1000}s. The backend may still be processing — please wait and refresh.`);
     }
-    // Network-level failure (CORS block, server down, DNS failure, etc.)
+    // Network-level failure
     const networkMsg = err.message || "Unknown network error";
     console.error(`[API] ✗ NETWORK ERROR — ${method} ${fullUrl}\n  └─ ${networkMsg}`);
-    // Try to give an actionable message
     if (networkMsg.includes("Failed to fetch") || networkMsg.includes("NetworkError")) {
       throw new Error(
         `Cannot reach backend at ${BACKEND_ROOT}. ` +
@@ -115,13 +178,62 @@ async function fetchAPI(endpoint: string, options: RequestInit & { timeout?: num
         errorMessage = errorData.message;
       }
     } catch (_) {
-      // rawBody wasn't JSON — use it directly (trimmed)
       errorMessage = rawBody.slice(0, 300) || `HTTP ${res.status}`;
     }
     throw new Error(errorMessage);
   }
 
   return res.json();
+}
+
+async function fetchAPI(endpoint: string, options: RequestInit & { timeout?: number } = {}): Promise<any> {
+  const method = (options.method || "GET").toUpperCase();
+  const key = `${method}:${endpoint}:${options.body ? String(options.body) : ""}`;
+
+  if (inFlightRequests.has(key)) {
+    console.log(`[API] ⚡ Deduplicating in-flight request: ${method} ${endpoint}`);
+    return inFlightRequests.get(key);
+  }
+
+  const promise = (async () => {
+    let lastError: any = null;
+    const maxRetries = 3;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          // Exponential backoff: 2^attempt * 1000ms + random jitter up to 500ms
+          const delay = Math.min(10000, Math.pow(2, attempt) * 1000 + Math.random() * 500);
+          console.log(`[API] 🔄 Retrying request (attempt ${attempt}/${maxRetries}) in ${Math.round(delay)}ms: ${method} ${endpoint}`);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+        }
+
+        return await fetchRaw(endpoint, options);
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[API] Attempt ${attempt} failed: ${err.message}`);
+
+        // Do not retry on client errors (4xx) except for timeout/rate limit issues (408, 429)
+        const isClientError = err.message && err.message.startsWith("HTTP ") && 
+          !err.message.includes("500") && !err.message.includes("502") && 
+          !err.message.includes("503") && !err.message.includes("504") && 
+          !err.message.includes("408") && !err.message.includes("429");
+
+        if (isClientError) {
+          throw err;
+        }
+      }
+    }
+    throw lastError;
+  })();
+
+  inFlightRequests.set(key, promise);
+
+  try {
+    return await promise;
+  } finally {
+    inFlightRequests.delete(key);
+  }
 }
 
 export const api = {
@@ -177,6 +289,7 @@ export const api = {
       body: JSON.stringify({ email, password }),
     });
     if (data.access_token) {
+      console.log("User Logged In");
       setToken(data.access_token);
     }
     return data;
@@ -187,18 +300,22 @@ export const api = {
   },
 
   // JAM API
-  async generateTopic(category?: string) {
-    const query = category ? `?category=${encodeURIComponent(category)}` : "";
+  async generateTopic(category?: string, difficulty?: string) {
+    const params = new URLSearchParams();
+    if (category) params.append("category", category);
+    if (difficulty) params.append("difficulty", difficulty);
+    const query = params.toString() ? `?${params.toString()}` : "";
     return fetchAPI(`/generate-topic${query}`);
   },
 
-  async getTopic(category?: string) {
-    return this.generateTopic(category);
+  async getTopic(category?: string, difficulty?: string) {
+    return this.generateTopic(category, difficulty);
   },
 
   async createSession(
     topic: string,
     category: string,
+    difficulty = "Medium",
     instantStart = false,
     preparationMode = false,
     skipPreparation = false
@@ -209,6 +326,7 @@ export const api = {
       body: JSON.stringify({
         topic,
         category,
+        difficulty,
         instant_start: instantStart,
         preparation_mode: preparationMode,
         skip_preparation: skipPreparation
@@ -222,17 +340,75 @@ export const api = {
 
     return fetchAPI(`/jam/session/${sessionId}/upload`, {
       method: "POST",
-      body: formData, // Fetch automatically sets content-type for FormData
-      timeout: 120000, // 2 minutes timeout for video upload
+      body: formData,
+      timeout: 180000, // 180s
     });
+  },
+
+  /**
+   * Polls GET /jam/session/{sessionId} every intervalMs until
+   * analysis_status is 'completed' or 'failed', or maxWaitMs is exceeded.
+   * Throws if timed out or analysis failed.
+   */
+  async pollUntilComplete(
+    sessionId: string,
+    onProgress?: (status: string, elapsed: number) => void,
+    intervalMs = 3000,
+    maxWaitMs = 600000  // 10 minutes
+  ): Promise<any> {
+    const start = Date.now();
+    while (true) {
+      const elapsed = Date.now() - start;
+      if (elapsed > maxWaitMs) {
+        throw new Error(`Analysis timed out after ${Math.round(maxWaitMs / 1000)}s. Please try again.`);
+      }
+      const session = await fetchAPI(`/jam/session/${sessionId}`, { timeout: 15000 });
+      const status: string = session.analysis_status ?? "processing";
+      onProgress?.(status, elapsed);
+      if (status === "completed") return session;
+      if (status === "failed") {
+        throw new Error(session.message || "Analysis failed on the server. Please re-record and try again.");
+      }
+      await new Promise(r => setTimeout(r, intervalMs));
+    }
+  },
+
+  /**
+   * Polls GET /document/session/{sessionId} every intervalMs until
+   * analysis_status is 'completed' or 'failed', or maxWaitMs is exceeded.
+   */
+  async pollDocSessionUntilComplete(
+    sessionId: string,
+    onProgress?: (status: string, elapsed: number) => void,
+    intervalMs = 3000,
+    maxWaitMs = 600000
+  ): Promise<any> {
+    const start = Date.now();
+    while (true) {
+      const elapsed = Date.now() - start;
+      if (elapsed > maxWaitMs) {
+        throw new Error(`Analysis timed out after ${Math.round(maxWaitMs / 1000)}s. Please try again.`);
+      }
+      const session = await fetchAPI(`/document/session/${sessionId}`, { timeout: 15000 });
+      const status: string = session.analysis_status ?? "processing";
+      onProgress?.(status, elapsed);
+      if (status === "completed") return session;
+      if (status === "failed") throw new Error("Analysis failed on the server. Please re-record and try again.");
+      await new Promise(r => setTimeout(r, intervalMs));
+    }
   },
 
   async getSession(sessionId: string) {
     return fetchAPI(`/jam/session/${sessionId}`);
   },
 
-  async getHistory() {
-    return fetchAPI("/jam/history");
+  async getSessionVideo(sessionId: string): Promise<{ video_url: string }> {
+    return fetchAPI(`/session/${sessionId}/video`);
+  },
+
+  async getHistory(limit?: number) {
+    const query = limit !== undefined ? `?limit=${limit}` : "";
+    return fetchAPI(`/jam/history${query}`);
   },
 
   async getLeaderboard() {
@@ -241,11 +417,6 @@ export const api = {
 
   async getAnalytics() {
     return fetchAPI("/jam/analytics");
-  },
-
-  // Deepgram WebSocket Token
-  async getDeepgramToken() {
-    return fetchAPI("/deepgram/token");
   },
 
   // Debate Arena API
@@ -267,7 +438,7 @@ export const api = {
     return fetchAPI(`/debate/session/${sessionId}/upload`, {
       method: "POST",
       body: formData,
-      timeout: 120000,
+      timeout: 180000,
     });
   },
 
@@ -309,6 +480,35 @@ export const api = {
     return fetchAPI("/coach/recommendations");
   },
 
+  async pollCoachJob(
+    jobId: string,
+    onProgress?: (status: string, progress: number, message: string) => void,
+    intervalMs = 2000,
+    maxWaitMs = 120000
+  ): Promise<any> {
+    const start = Date.now();
+    while (true) {
+      const elapsed = Date.now() - start;
+      if (elapsed > maxWaitMs) {
+        throw new Error(`Coaching analysis timed out after ${Math.round(maxWaitMs / 1000)}s.`);
+      }
+      const job = await fetchAPI(`/job-status/${jobId}`);
+      const status: string = job.status ?? "pending";
+      const progress: number = job.progress ?? 0;
+      const message: string = job.message ?? "";
+      
+      onProgress?.(status, progress, message);
+      
+      if (status === "completed") {
+        return job.result;
+      }
+      if (status === "failed") {
+        throw new Error(job.error || "Coaching recommendation generation failed on the server.");
+      }
+      await new Promise(r => setTimeout(r, intervalMs));
+    }
+  },
+
   async getChallenges() {
     return fetchAPI("/coach/challenges");
   },
@@ -321,12 +521,13 @@ export const api = {
 
   // Document-Based Communication Analyzer API
   async uploadDocument(file: File) {
+    console.log("Document Upload Started");
     const formData = new FormData();
     formData.append("file", file);
     return fetchAPI("/document/upload", {
       method: "POST",
       body: formData,
-      timeout: 60000,
+      timeout: 180000,
     });
   },
 
@@ -382,7 +583,7 @@ export const api = {
     return fetchAPI(`/document/viva/${vivaId}/answer?question_index=${questionIndex}`, {
       method: "POST",
       body: formData,
-      timeout: 120000,
+      timeout: 180000,
     });
   },
 

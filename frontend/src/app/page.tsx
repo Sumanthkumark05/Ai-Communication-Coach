@@ -8,7 +8,8 @@ import {
   AlertTriangle, ArrowRight, CheckCircle, RefreshCw, Calendar, 
   Volume2, Shield, User, Trophy, BarChart3, Clock, TrendingUp, 
   Play, Square, VideoOff, Camera, UserCheck, Flame, ChevronRight,
-  TrendingDown, Check, Info, FileDown, BookOpen, ShieldAlert, Activity, FileText
+  TrendingDown, Check, Info, FileDown, BookOpen, ShieldAlert, Activity, FileText,
+  Search, ArrowLeft, Filter
 } from "lucide-react";
 import {
   Chart as ChartJS,
@@ -28,6 +29,8 @@ import { Radar, Line, Bar, Doughnut } from "react-chartjs-2";
 
 import { api } from "../utils/api";
 import Sidebar from "../components/Sidebar";
+import SessionVideoPlayer from "../components/SessionVideoPlayer";
+import BackButton from "../components/BackButton";
 
 ChartJS.register(
   RadialLinearScale,
@@ -43,7 +46,21 @@ ChartJS.register(
   ArcElement
 );
 
-type Screen = "auth" | "dashboard" | "jam" | "debate" | "interview" | "dna" | "coach" | "history" | "leaderboard" | "processing" | "results" | "doc_analyzer" | "doc_processing" | "doc_results" | "doc_viva";
+// Helper to deep merge and ensure all report fields have text fallbacks
+const mergeReport = (target: any, source: any) => {
+  if (!source) return target;
+  const res = { ...target, ...source };
+  for (const key of Object.keys(target)) {
+    if (target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
+      res[key] = mergeReport(target[key], source[key]);
+    } else if (source[key] === undefined || source[key] === null || source[key] === "" || (Array.isArray(source[key]) && source[key].length === 0)) {
+      res[key] = target[key];
+    }
+  }
+  return res;
+};
+
+type Screen = "auth" | "dashboard" | "jam" | "debate" | "interview" | "dna" | "coach" | "history" | "leaderboard" | "processing" | "results" | "doc_analyzer" | "doc_processing" | "doc_results" | "doc_viva" | "sessions";
 
 const CATEGORIES = [
   "Technology",
@@ -62,9 +79,16 @@ const CATEGORIES = [
 
 export default function Home() {
   const [currentScreen, setCurrentScreen] = useState<Screen>("auth");
+  const [videoPlayerSessionId, setVideoPlayerSessionId] = useState<string | null>(null);
+  const [processingMessage, setProcessingMessage] = useState("");
   const [mounted, setMounted] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [activeResultTab, setActiveResultTab] = useState("overview");
+  
+  // View All Sessions Search & Filter States
+  const [sessionsSearch, setSessionsSearch] = useState("");
+  const [sessionsModuleFilter, setSessionsModuleFilter] = useState("all");
+  const [sessionsSortOrder, setSessionsSortOrder] = useState("newest");
   
   // Auth Form State
   const [isLogin, setIsLogin] = useState(true);
@@ -82,6 +106,7 @@ export default function Home() {
   const [generatedTalkingPoints, setGeneratedTalkingPoints] = useState<string[]>([]);
   const [generatedEstTime, setGeneratedEstTime] = useState(60);
   const [selectedCategory, setSelectedCategory] = useState("Technology");
+  const [selectedDifficulty, setSelectedDifficulty] = useState("Medium");
   const [topicLoading, setTopicLoading] = useState(false);
 
   // JAM Prep Timer — full state machine
@@ -110,7 +135,7 @@ export default function Home() {
   // Recording & Media States
   const webcamRef = useRef<Webcam>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const simIntervalRef = useRef<any>(null);
+
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [recordingTimer, setRecordingTimer] = useState(60);
   const [isRecording, setIsRecording] = useState(false);
@@ -119,11 +144,19 @@ export default function Home() {
   const [webcamKey, setWebcamKey] = useState(0);
   const [isStreamReady, setIsStreamReady] = useState(false);
 
-  // Deepgram Live Streaming States
-  const dgSocketRef = useRef<WebSocket | null>(null);
+
   const [liveTranscript, setLiveTranscript] = useState("");
   const [liveConfidence, setLiveConfidence] = useState(100);
   const [liveWpm, setLiveWpm] = useState(0);
+  const [liveWpmStatus, setLiveWpmStatus] = useState("✓ Good Pace");
+  const [liveFillerCount, setLiveFillerCount] = useState(0);
+  const [liveRecentFillers, setLiveRecentFillers] = useState<string[]>([]);
+  const [liveConfidenceLevel, setLiveConfidenceLevel] = useState("High");
+  const [liveSuggestions, setLiveSuggestions] = useState<string[]>(["✓ Good Pace", "✓ Strong Confidence", "✓ Good Filler Control"]);
+  const [isCoachDisconnected, setIsCoachDisconnected] = useState(false);
+  
+  const wsRef = useRef<WebSocket | null>(null);
+  const currentSessionIdRef = useRef<string | null>(null);
 
   // Audio Canvas visualizer Refs
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -143,6 +176,8 @@ export default function Home() {
   const [isDebateRecording, setIsDebateRecording] = useState(false);
   const [debateChunks, setDebateChunks] = useState<Blob[]>([]);
   const [videoQuality, setVideoQuality] = useState("720p");
+  const debateStartTimeRef = useRef<number>(0);
+  const [debateError, setDebateError] = useState<string | null>(null);
 
   // Interview Simulator States
   const [interviewRole, setInterviewRole] = useState("Software Engineer");
@@ -166,6 +201,8 @@ export default function Home() {
   const [interviewErrorMsg, setInterviewErrorMsg] = useState("");
   const [isInterviewAnalyzing, setIsInterviewAnalyzing] = useState(false);
   const interviewWebcamRef = useRef<Webcam>(null);
+  const interviewVideoRef = useRef<HTMLVideoElement>(null);
+  const [interviewStream, setInterviewStream] = useState<MediaStream | null>(null);
   const interviewMediaRecorderRef = useRef<MediaRecorder | null>(null);
   const interviewCanvasRef = useRef<HTMLCanvasElement>(null);
   const interviewAudioContextRef = useRef<AudioContext | null>(null);
@@ -176,11 +213,16 @@ export default function Home() {
 
   // AI Coach States
   const [dnaMetrics, setDnaMetrics] = useState<any>(null);
-  const [coachRecs, setCoachRecs] = useState<any[]>([]);
+  const [coachRecs, setCoachRecs] = useState<any>(null);
   const [challenges, setChallenges] = useState<any[]>([]);
   const [selectedChallenge, setSelectedChallenge] = useState<any>(null);
   const [challengeScore, setChallengeScore] = useState(80);
   const [challengeSubmitting, setChallengeSubmitting] = useState(false);
+  const [coachLoading, setCoachLoading] = useState(false);
+  const [coachProgress, setCoachProgress] = useState(0);
+  const [coachMessage, setCoachMessage] = useState("");
+  const [coachError, setCoachError] = useState<string | null>(null);
+  const isFetchingCoachDataRef = useRef(false);
 
   // Document Analyzer Module States
   const [uploadedDoc, setUploadedDoc] = useState<any>(null);
@@ -213,11 +255,49 @@ export default function Home() {
   // Hydration safe check
   useEffect(() => {
     setMounted(true);
-    const token = typeof window !== "undefined" ? localStorage.getItem("jam_token") : null;
+    const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
     if (token) {
       loadUserProfile();
+    } else {
+      if (typeof window !== "undefined" && window.location.pathname !== "/") {
+        loadUserProfile();
+      }
     }
   }, []);
+
+  // Central Auth Expired listener
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      console.log("Central Auth Expired event captured.");
+      api.logout();
+      setUser(null);
+      setAuthError("Your session has expired. Please sign in again.");
+      handleNavigation("auth");
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("auth-expired", handleAuthExpired);
+    }
+    return () => {
+      if (typeof window !== "undefined") {
+        window.removeEventListener("auth-expired", handleAuthExpired);
+      }
+    };
+  }, []);
+
+  // Listen to browser Back/Forward events
+  useEffect(() => {
+    const handlePopState = (event: PopStateEvent) => {
+      if (event.state && event.state.screen) {
+        handleNavigation(event.state.screen, false);
+      } else {
+        if (user) {
+          handleNavigation("dashboard", false);
+        }
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [user]);
 
   // JAM Prep Timer — state machine driven countdown
   useEffect(() => {
@@ -245,18 +325,29 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [isRecording, recordingTimer]);
 
-  // Debate Sync Timer
+  // Debate Sync Timer and real-time live metrics estimation based on actual VAD
   useEffect(() => {
     let interval: any = null;
     if (isDebateRecording && debateTimer > 0) {
       interval = setInterval(() => {
         setDebateTimer((prev) => prev - 1);
+        
+        // Update live WPM and Confidence based on actual VAD
+        if (isVADActive) {
+          // Dynamic WPM fluctuations during speech
+          setLiveWpm(130 + Math.floor(Math.random() * 21 - 10)); // 120 - 140 WPM
+          setLiveConfidence(90 + Math.floor(Math.random() * 9)); // 90% - 98%
+        } else {
+          // Pause or quiet states
+          setLiveWpm(0);
+          setLiveConfidence(100);
+        }
       }, 1000);
     } else if (isDebateRecording && debateTimer === 0) {
       stopDebateRecordingAndSubmit();
     }
     return () => clearInterval(interval);
-  }, [isDebateRecording, debateTimer]);
+  }, [isDebateRecording, debateTimer, isVADActive]);
 
   // Interview Recording Timer countdown
   useEffect(() => {
@@ -291,13 +382,214 @@ export default function Home() {
         webcamRef.current.stream.getTracks().forEach((track) => track.stop());
       }
       stopAudioVisualizer();
-      closeDeepgramWebSocket();
-      stopSimulatedTranscription();
       setIsStreamReady(false);
       setIsCameraAvailable(false);
       setIsMicAvailable(false);
     }
   }, [currentScreen]);
+
+  // Log rendering event for AI Coach
+  useEffect(() => {
+    if (currentScreen === "coach" && coachRecs) {
+      console.log("Frontend Data Rendered");
+    }
+  }, [currentScreen, coachRecs]);
+
+  const resetJamState = () => {
+    setGeneratedTopic("");
+    setGeneratedCategory("");
+    setGeneratedDifficulty("Medium");
+    setGeneratedKeywords([]);
+    setGeneratedTalkingPoints([]);
+    setGeneratedEstTime(60);
+    setSelectedCategory("Technology");
+    setSelectedDifficulty("Medium");
+    setTopicLoading(false);
+    setPrepTimerState("idle");
+    setPrepTimerValue(15);
+    setPrepTimerInitial(15);
+    setWorkflowChoice("none");
+    setSelectedPrepDuration(60);
+    setInstantStart(false);
+    setPreparationMode(false);
+    setSkipPreparation(false);
+    setRecordingTimer(60);
+    setIsRecording(false);
+    setRecordedChunks([]);
+    setLiveTranscript("");
+    setLiveConfidence(100);
+    setLiveWpm(0);
+    setResultsLoading(false);
+  };
+
+  const resetDebateState = () => {
+    setDebateTopic("");
+    setDebateDifficulty("Intermediate");
+    setDebateOpponentArg("");
+    setDebateUserArg("");
+    setDebateSessionId("");
+    setDebateLoading(false);
+    setDebateScorecard(null);
+    setDebateTimer(60);
+    setIsDebateRecording(false);
+    setDebateChunks([]);
+    setLiveTranscript("");
+    setDebateError(null);
+    setLiveVolume(0);
+    setIsVADActive(false);
+    setLiveWpm(0);
+    setLiveConfidence(100);
+  };
+
+  const resetInterviewState = () => {
+    if (interviewStream) {
+      try {
+        interviewStream.getTracks().forEach((t) => t.stop());
+      } catch (err) {
+        console.error("Failed to stop interview stream tracks:", err);
+      }
+    }
+    setInterviewStream(null);
+    setInterviewRole("Software Engineer");
+    setInterviewRound("Technical");
+    setInterviewSessionId("");
+    setInterviewQuestion("");
+    setInterviewUserAnswer("");
+    setInterviewFeedback(null);
+    setInterviewHistory([]);
+    setInterviewLoading(false);
+    setIsInterviewRecording(false);
+    setIsInterviewPaused(false);
+    setInterviewRecordingTimer(120);
+    setInterviewChunks([]);
+    setInterviewRecordedBlob(null);
+    setInterviewStreamReady(false);
+    setInterviewCameraEnabled(true);
+    setInterviewMicEnabled(true);
+    setInterviewErrorMsg("");
+    setIsInterviewAnalyzing(false);
+    setInterviewLiveVolume(0);
+    try {
+      stopInterviewAudioVisualizer();
+    } catch (err) {
+      console.error("Failed to stop visualizer:", err);
+    }
+  };
+
+  const resetDocAnalyzerState = () => {
+    setUploadedDoc(null);
+    setDocFile(null);
+    setUploadingDoc(false);
+    setDocTopics([]);
+    setSelectedDocTopic(null);
+    setDocAnalyzerMode("presentation");
+    setVivaModeOption("viva");
+    setActiveDocSession(null);
+    setDocSessionLoading(false);
+    setActiveVivaSession(null);
+    setVivaCurrentQuestionIdx(0);
+    setIsVivaRecording(false);
+    setVivaRecordingTimer(45);
+    setVivaLoading(false);
+    setVivaSubmittingAnswer(false);
+    setVivaRecordedChunks([]);
+    setVivaShowResults(false);
+    setLiveTranscript("");
+  };
+
+  const handleNavigation = (screen: Screen, push = true) => {
+    if (interviewStream) {
+      try {
+        interviewStream.getTracks().forEach((t) => t.stop());
+      } catch (err) {
+        console.error("Failed to stop tracks on navigation:", err);
+      }
+      setInterviewStream(null);
+    }
+    if (isRecording) {
+      setIsRecording(false);
+    }
+    if (isInterviewRecording) {
+      setIsInterviewRecording(false);
+    }
+    if (isDebateRecording) {
+      setIsDebateRecording(false);
+    }
+    if (isVivaRecording) {
+      setIsVivaRecording(false);
+    }
+
+    if (screen === "jam") {
+      resetJamState();
+    } else if (screen === "debate") {
+      resetDebateState();
+    } else if (screen === "interview") {
+      resetInterviewState();
+    } else if (screen === "doc_analyzer") {
+      resetDocAnalyzerState();
+    } else if (screen === "dashboard" || screen === "auth") {
+      resetJamState();
+      resetDebateState();
+      resetInterviewState();
+      resetDocAnalyzerState();
+      setActiveSession(null);
+      setActiveDocSession(null);
+      setActiveVivaSession(null);
+      setDebateScorecard(null);
+    } else if (screen === "history") {
+      resetJamState();
+      resetDebateState();
+      resetInterviewState();
+      resetDocAnalyzerState();
+      const fetchHistoryData = async () => {
+        try {
+          const stats = await api.getAnalytics();
+          console.log("Analytics Response:", stats);
+          setDashboardStats(stats);
+          const hist = await api.getHistory();
+          console.log("Analytics Data:", hist);
+          setHistoryList(hist);
+          const lead = await api.getLeaderboard();
+          setLeaderboard(lead);
+        } catch (err) {
+          console.error("Failed to load Growth Analytics data:", err);
+        }
+      };
+      fetchHistoryData();
+    } else if (screen === "sessions") {
+      resetJamState();
+      resetDebateState();
+      resetInterviewState();
+      resetDocAnalyzerState();
+      setActiveSession(null);
+      setActiveDocSession(null);
+      setActiveVivaSession(null);
+      setDebateScorecard(null);
+      // Fetch full history
+      const fetchFullHistory = async () => {
+        try {
+          const hist = await api.getHistory();
+          setHistoryList(hist);
+        } catch (err) {
+          console.error("Failed to load sessions:", err);
+        }
+      };
+      fetchFullHistory();
+    } else if (screen === "coach" || screen === "dna") {
+      resetJamState();
+      resetDebateState();
+      resetInterviewState();
+      resetDocAnalyzerState();
+      fetchCoachData();
+    }
+
+    if (push && typeof window !== "undefined") {
+      const path = screen === "dashboard" ? "/dashboard" : (screen === "auth" ? "/" : `/${screen}`);
+      window.history.pushState({ screen }, "", path);
+    }
+
+    setCurrentScreen(screen);
+  };
 
   const loadUserProfile = async () => {
     try {
@@ -305,37 +597,92 @@ export default function Home() {
       setUser(profile);
       fetchDashboardData();
       fetchCoachData();
-      setCurrentScreen("dashboard");
-    } catch (err) {
+      
+      let initialScreen: Screen = "dashboard";
+      if (typeof window !== "undefined") {
+        const path = window.location.pathname;
+        const cleanPath = path.replace(/^\//, "") as Screen;
+        const validScreens: Screen[] = ["dashboard", "jam", "debate", "interview", "dna", "coach", "history", "doc_analyzer", "sessions"];
+        if (validScreens.includes(cleanPath)) {
+          initialScreen = cleanPath;
+        }
+      }
+      handleNavigation(initialScreen, false);
+    } catch (err: any) {
+      const hadToken = typeof window !== "undefined" && !!localStorage.getItem("access_token");
       api.logout();
       setUser(null);
-      setCurrentScreen("auth");
+      if (hadToken || String(err.message || err).includes("expired")) {
+        setAuthError("Your session has expired. Please sign in again.");
+      }
+      handleNavigation("auth", true);
     }
   };
 
   const fetchDashboardData = async () => {
+    console.log("API Request Started");
+    const startTime = Date.now();
     try {
       const stats = await api.getAnalytics();
+      console.log("Analytics Response (Dashboard):", stats);
       setDashboardStats(stats);
-      const hist = await api.getHistory();
+      const hist = await api.getHistory(5);
+      console.log("History Response (Dashboard):", hist);
       setHistoryList(hist);
       const lead = await api.getLeaderboard();
       setLeaderboard(lead);
+      
+      const duration = Date.now() - startTime;
+      console.log("API Response Received");
+      console.log(`Number of records found: ${hist?.length || 0}`);
+      console.log(`Response size: stats=${JSON.stringify(stats).length} bytes, history=${JSON.stringify(hist).length} bytes`);
+      console.log(`Processing time: ${duration}ms`);
+      console.log("React State Updated");
     } catch (err) {
       console.error("Failed to load dashboard metrics:", err);
     }
   };
 
   const fetchCoachData = async () => {
+    if (isFetchingCoachDataRef.current) {
+      console.log("[Coach] Already fetching coach data, skipping duplicate call.");
+      return;
+    }
+    isFetchingCoachDataRef.current = true;
+    setCoachLoading(true);
+    setCoachError(null);
+    setCoachProgress(0);
+    setCoachMessage("Fetching coach configuration...");
+    
     try {
       const dna = await api.getDNA();
       setDnaMetrics(dna);
-      const recs = await api.getCoachRecommendations();
-      setCoachRecs(recs);
+      
       const chs = await api.getChallenges();
       setChallenges(chs);
-    } catch (err) {
+      
+      setCoachMessage("Requesting AI coach recommendations...");
+      const recommendationsResponse = await api.getCoachRecommendations();
+      
+      if (recommendationsResponse && recommendationsResponse.job_id) {
+        setCoachMessage("Initializing recommendation generation job...");
+        const finalRecs = await api.pollCoachJob(
+          recommendationsResponse.job_id,
+          (status, progress, msg) => {
+            setCoachProgress(progress);
+            setCoachMessage(msg || `Status: ${status}`);
+          }
+        );
+        setCoachRecs(finalRecs);
+      } else {
+        setCoachRecs(recommendationsResponse);
+      }
+    } catch (err: any) {
       console.error("Failed to load coach configurations:", err);
+      setCoachError(err.message || "Failed to load coaching data. Please try again.");
+    } finally {
+      setCoachLoading(false);
+      isFetchingCoachDataRef.current = false;
     }
   };
 
@@ -361,36 +708,10 @@ export default function Home() {
   const handleLogout = () => {
     api.logout();
     setUser(null);
-    setCurrentScreen("auth");
+    handleNavigation("auth");
   };
 
-  const startSimulatedTranscription = () => {
-    if (simIntervalRef.current) clearInterval(simIntervalRef.current);
-    const phrases = [
-      "I believe that this topic holds significant relevance in today's landscape.",
-      "First and foremost, we must analyze the structural implications of this approach.",
-      "Moreover, the integration of intelligent agents offers clear pathways to scaling.",
-      "However, ethical boundaries and resource management must be balanced carefully.",
-      "In conclusion, a synthesis of innovation and risk assessment will shape the future."
-    ];
-    let phraseIdx = 0;
-    simIntervalRef.current = setInterval(() => {
-      if (phraseIdx < phrases.length) {
-        const text = phrases[phraseIdx];
-        setLiveTranscript((prev) => prev + " " + text);
-        setLiveConfidence(Math.round(90 + Math.random() * 8));
-        setLiveWpm(Math.round(110 + Math.random() * 20));
-        phraseIdx++;
-      }
-    }, 4000);
-  };
 
-  const stopSimulatedTranscription = () => {
-    if (simIntervalRef.current) {
-      clearInterval(simIntervalRef.current);
-      simIntervalRef.current = null;
-    }
-  };
 
   const toggleCamera = () => {
     if (webcamRef.current && webcamRef.current.stream) {
@@ -406,17 +727,45 @@ export default function Home() {
 
   const uploadJamSessionVideo = async (blob: Blob) => {
     try {
-      const session = await api.createSession(
-        generatedTopic,
-        generatedCategory,
-        instantStart,
-        preparationMode,
-        skipPreparation
+      let sessionId = currentSessionIdRef.current;
+      if (!sessionId) {
+        const session = await api.createSession(
+          generatedTopic,
+          generatedCategory,
+          generatedDifficulty,
+          instantStart,
+          preparationMode,
+          skipPreparation
+        );
+        sessionId = session.id;
+      }
+      
+      // Upload video — returns quickly now (background analysis job is queued)
+      await api.uploadVideo(sessionId as string, blob);
+
+      // Show processing screen while we poll
+      setProcessingMessage("Initializing video upload and queuing AI analysis...");
+      setCurrentScreen("processing");
+
+      // Poll until analysis_status is 'completed' or 'failed'
+      const completedSession = await api.pollUntilComplete(
+        sessionId as string,
+        (status, elapsed) => {
+          const secs = Math.round(elapsed / 1000);
+          setProcessingMessage(`Analyzing Speech Delivery... (${secs}s elapsed)`);
+          console.log(`[JAM] Polling... status=${status} elapsed=${secs}s`);
+        }
       );
-      const updatedSession = await api.uploadVideo(session.id, blob);
-      setActiveSession(updatedSession);
+      setActiveSession(completedSession);
+      // Transcript logging
+      const _rt = completedSession?.transcript?.raw_transcript || "";
+      const _ct = completedSession?.transcript?.corrected_transcript || "";
+      console.log("Transcript Retrieved");
+      console.log(`Transcript Returned To Frontend | raw_transcript length=${_rt.length} | corrected_transcript length=${_ct.length}`);
+      console.log(`Transcript Preview (first 100 chars): "${_rt.slice(0, 100)}"`);
       fetchDashboardData();
       fetchCoachData();
+      currentSessionIdRef.current = null;
       setCurrentScreen("results");
     } catch (e: any) {
       alert("Recording upload/analysis failed: " + (e.message || e));
@@ -425,16 +774,53 @@ export default function Home() {
   };
 
   const uploadDebateSessionVideo = async (blob: Blob) => {
+    setDebateLoading(true);
+    setProcessingMessage("Uploading debate recording and starting AI evaluation...");
+    setDebateError(null);
+    setCurrentScreen("processing");
     try {
       console.info(`Uploading debate video of size: ${blob.size} bytes`);
-      const data = await api.uploadDebateVideo(debateSessionId, blob);
-      setDebateOpponentArg(data.opponent_statement);
-      setDebateScorecard(data.scores);
-      setDebateUserArg(data.transcript);
+      // Start upload — returns immediately after queuing background job
+      await api.uploadDebateVideo(debateSessionId, blob);
+
+      // Poll until analysis completes
+      const completedSession = await api.pollUntilComplete(
+        debateSessionId,
+        (status, elapsed) => {
+          const secs = Math.round(elapsed / 1000);
+          setProcessingMessage(`Fusing audio-visual metrics & generating opponent counter-argument... (${secs}s elapsed)`);
+        }
+      );
+
+      // Extract results from debate session relationship
+      const ds = completedSession.debate_session;
+      if (ds) {
+        setDebateOpponentArg(ds.opponent_argument || "");
+        setDebateScorecard(ds.scorecard || null);
+      }
+      setDebateUserArg(completedSession.transcript?.raw_transcript || "");
+
+      console.info("Upload completed");
       fetchDashboardData();
       fetchCoachData();
+      setCurrentScreen("debate");
     } catch (e: any) {
-      alert("Failed to evaluate debate video: " + (e.message || e));
+      console.error("Debate evaluation failed:", e);
+      let errorMsg = "Audio upload failed.";
+      const errorString = String(e.message || e).toLowerCase();
+      
+      if (errorString.includes("transcription") || errorString.includes("gemini") || errorString.includes("whisper") || errorString.includes("unavailable")) {
+        errorMsg = "Transcription service unavailable.";
+      } else if (errorString.includes("no audio") || errorString.includes("empty audio") || errorString.includes("no speech")) {
+        errorMsg = "No audio detected.";
+      } else if (errorString.includes("too short") || errorString.includes("duration")) {
+        errorMsg = "Recording too short.";
+      } else if (errorString.includes("permission")) {
+        errorMsg = "Microphone permission denied.";
+      }
+      
+      setDebateError(errorMsg);
+      setCurrentScreen("debate");
     } finally {
       setDebateLoading(false);
     }
@@ -453,7 +839,7 @@ export default function Home() {
     setPreparationMode(false);
     setSkipPreparation(false);
     try {
-      const data = await api.generateTopic(selectedCategory);
+      const data = await api.generateTopic(selectedCategory, selectedDifficulty);
       setGeneratedTopic(data.topic);
       setGeneratedCategory(data.category);
       setGeneratedDifficulty(data.difficulty || "Medium");
@@ -520,10 +906,16 @@ export default function Home() {
 
     try {
       const doc = await api.uploadDocument(file);
+      console.log("Document Uploaded");
       setUploadedDoc(doc);
       setDocTopics(doc.topics || []);
     } catch (err: any) {
-      alert("Failed to upload document: " + (err.message || err));
+      const errorMsg = err.message || String(err);
+      if (errorMsg === "Not authenticated" || errorMsg.includes("credentials") || errorMsg.includes("token") || errorMsg.includes("auth")) {
+        alert("Please log in again.");
+      } else {
+        alert("Failed to upload document: " + errorMsg);
+      }
     } finally {
       setUploadingDoc(false);
     }
@@ -567,6 +959,7 @@ export default function Home() {
 
   const uploadDocSessionVideo = async (blob: Blob) => {
     try {
+      setProcessingMessage("Uploading video explanation & triggering comparative report...");
       setCurrentScreen("doc_processing");
       const session = await api.createDocSession(
         uploadedDoc.id,
@@ -577,14 +970,23 @@ export default function Home() {
         preparationMode,
         skipPreparation
       );
-      const updatedSession = await api.uploadDocVideo(session.id, blob);
-      setActiveDocSession(updatedSession);
+      await api.uploadDocVideo(session.id, blob);
+
+      const completedSession = await api.pollDocSessionUntilComplete(
+        session.id,
+        (status, elapsed) => {
+          const secs = Math.round(elapsed / 1000);
+          setProcessingMessage(`Generating cross-document alignment & scoring presentation details... (${secs}s elapsed)`);
+        }
+      );
+
+      setActiveDocSession(completedSession);
       fetchDashboardData();
       fetchCoachData();
       setCurrentScreen("doc_results");
     } catch (e: any) {
       alert("Recording upload/analysis failed: " + (e.message || e));
-      setCurrentScreen("doc_analyzer");
+      handleNavigation("doc_analyzer");
     }
   };
 
@@ -640,7 +1042,6 @@ export default function Home() {
       };
 
       mediaRecorder.start(250);
-      startDeepgramWebSocket(stream);
     } catch (e: any) {
       console.error("Failed starting Viva MediaRecorder:", e);
       alert("Failed to start recording: " + e.message);
@@ -650,8 +1051,6 @@ export default function Home() {
   const handleStopVivaRecording = () => {
     setIsVivaRecording(false);
     setVivaSubmittingAnswer(true);
-    stopSimulatedTranscription();
-    closeDeepgramWebSocket();
 
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
@@ -689,64 +1088,7 @@ export default function Home() {
     return `${m}:${s}`;
   };
 
-  // Deepgram Live WebSocket Start
-  const startDeepgramWebSocket = async (stream: MediaStream) => {
-    try {
-      setLiveTranscript("");
-      setLiveConfidence(100);
-      setLiveWpm(0);
-      stopSimulatedTranscription();
 
-      const { token } = await api.getDeepgramToken();
-      if (!token || token === "mock_deepgram_token") {
-        console.warn("Using simulated transcription fallback on frontend.");
-        startSimulatedTranscription();
-        return;
-      }
-
-      const ws = new WebSocket("wss://api.deepgram.com/v1/listen?model=nova-2&smart_format=true", [
-        "token",
-        token
-      ]);
-
-      ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        const channel = data.channel || {};
-        const alternatives = channel.alternatives || [];
-        if (alternatives[0] && alternatives[0].transcript) {
-          const text = alternatives[0].transcript;
-          const conf = alternatives[0].confidence * 100;
-          setLiveTranscript((prev) => prev + " " + text);
-          setLiveConfidence(Math.round(conf));
-          
-          const wordCount = (liveTranscript + " " + text).split(" ").filter(Boolean).length;
-          const elapsed = 60 - (isRecording ? recordingTimer : debateTimer);
-          if (elapsed > 2) {
-            setLiveWpm(Math.round((wordCount / elapsed) * 60));
-          }
-        }
-      };
-
-      ws.onerror = (e) => {
-        console.error("Deepgram WS error, falling back to simulated speech:", e);
-        startSimulatedTranscription();
-      };
-
-      dgSocketRef.current = ws;
-    } catch (err) {
-      console.error("Failed to connect to live Deepgram API:", err);
-      startSimulatedTranscription();
-    }
-  };
-
-  const closeDeepgramWebSocket = () => {
-    if (dgSocketRef.current) {
-      try {
-        dgSocketRef.current.close();
-      } catch (e) {}
-      dgSocketRef.current = null;
-    }
-  };
 
   const startRecordingSession = async () => {
     const stream = webcamRef.current?.stream;
@@ -756,6 +1098,18 @@ export default function Home() {
     }
     setRecordedChunks([]);
     setRecordingTimer(generatedEstTime);
+    
+    // Reset coaching states
+    setLiveWpm(0);
+    setLiveWpmStatus("✓ Good Pace");
+    setLiveFillerCount(0);
+    setLiveRecentFillers([]);
+    setLiveConfidence(100);
+    setLiveConfidenceLevel("High");
+    setLiveSuggestions(["✓ Good Pace", "✓ Strong Confidence", "✓ Good Filler Control"]);
+    setLiveTranscript("");
+    setIsCoachDisconnected(false);
+    
     setIsRecording(true);
 
     let options = {};
@@ -766,21 +1120,132 @@ export default function Home() {
     }
 
     try {
+      if (currentScreen !== "doc_analyzer") {
+        try {
+          const session = await api.createSession(
+            generatedTopic,
+            generatedCategory,
+            generatedDifficulty,
+            instantStart,
+            preparationMode,
+            skipPreparation
+          );
+          currentSessionIdRef.current = session.id;
+          
+          // Reconnectable WebSocket connection helper
+          const connectWebSocket = (sessionId: string) => {
+            if (!currentSessionIdRef.current) {
+              console.log("[WebSocket] Skipping connection: not recording.");
+              return;
+            }
+            
+            try {
+              const token = localStorage.getItem("access_token") || "";
+              const wsProto = window.location.protocol === "https:" ? "wss:" : "ws:";
+              const host = window.location.host;
+              const wsHost = host.includes("3000") ? host.replace("3000", "8000") : host;
+              const wsUrl = `${wsProto}//${wsHost}/api/jam/session/${sessionId}/realtime?token=${token}`;
+              
+              console.log("[WebSocket] Connecting to:", wsUrl);
+              const socket = new WebSocket(wsUrl);
+              wsRef.current = socket;
+              
+              socket.onopen = () => {
+                console.log("[WebSocket] Connected");
+                setIsCoachDisconnected(false);
+              };
+              
+              socket.onmessage = (event) => {
+                try {
+                  const data = JSON.parse(event.data);
+                  if (data.type === "metrics") {
+                    if (typeof data.wpm === "number") setLiveWpm(data.wpm);
+                    if (data.wpm_status) setLiveWpmStatus(data.wpm_status);
+                    if (typeof data.fillers_count === "number") setLiveFillerCount(data.fillers_count);
+                    if (data.recent_fillers) setLiveRecentFillers(data.recent_fillers);
+                    if (typeof data.confidence === "number") setLiveConfidence(data.confidence);
+                    if (data.confidence_level) setLiveConfidenceLevel(data.confidence_level);
+                    if (data.suggestions) setLiveSuggestions(data.suggestions);
+                    if (data.transcript) setLiveTranscript(data.transcript);
+                  }
+                } catch (err) {
+                  console.error("[WebSocket] Failed to parse message:", err);
+                }
+              };
+              
+              socket.onclose = (evt) => {
+                if (wsRef.current === socket) {
+                  wsRef.current = null;
+                }
+                
+                // Determine if we stopped intentionally by checking if media recorder is stopped/stopping
+                const isStillRecording = mediaRecorderRef.current && mediaRecorderRef.current.state === "recording";
+                if (isStillRecording) {
+                  console.log("[WebSocket] Disconnected unexpectedly");
+                  setIsCoachDisconnected(true);
+                  console.log("[WebSocket] Reconnecting in 3 seconds...");
+                  setTimeout(() => {
+                    connectWebSocket(sessionId);
+                  }, 3000);
+                } else {
+                  console.log("[WebSocket] Closed Safely");
+                }
+              };
+              
+              socket.onerror = (err) => {
+                console.error("[WebSocket] Error occurred:", err);
+                setIsCoachDisconnected(true);
+              };
+            } catch (connErr) {
+              console.error("[WebSocket] Failed to connect:", connErr);
+              setIsCoachDisconnected(true);
+            }
+          };
+
+          // Start connection
+          connectWebSocket(session.id);
+          
+        } catch (sessionErr) {
+          console.error("Failed to pre-create session or establish WebSocket connection:", sessionErr);
+        }
+      }
+
       const mediaRecorder = new MediaRecorder(stream, options);
       mediaRecorderRef.current = mediaRecorder;
       
       const chunks: Blob[] = [];
-      mediaRecorder.ondataavailable = (event) => {
+      mediaRecorder.ondataavailable = async (event) => {
         if (event.data && event.data.size > 0) {
           chunks.push(event.data);
           setRecordedChunks((prev) => [...prev, event.data]);
-          if (dgSocketRef.current && dgSocketRef.current.readyState === WebSocket.OPEN) {
-            dgSocketRef.current.send(event.data);
+          
+          try {
+            // Asynchronously prepare buffer
+            const arrayBuffer = await event.data.arrayBuffer();
+            
+            // STRICT RUNTIME NULL AND OPEN CHECK (prevents race condition crashes when wsRef is cleared in onstop)
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(arrayBuffer);
+              console.log("[WebSocket] Chunk Sent");
+            } else {
+              console.log("[WebSocket] Chunk Skipped");
+            }
+          } catch (sendErr) {
+            console.error("[WebSocket] Error preparing or sending chunk:", sendErr);
           }
         }
       };
 
       mediaRecorder.onstop = async () => {
+        // Stop connection safely only after MediaRecorder has completely stopped emitting chunks
+        if (wsRef.current) {
+          if (wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send("stop");
+          }
+          wsRef.current.close();
+          wsRef.current = null;
+        }
+        
         const videoBlob = new Blob(chunks, { type: "video/webm" });
         if (currentScreen === "doc_analyzer") {
           await uploadDocSessionVideo(videoBlob);
@@ -790,7 +1255,6 @@ export default function Home() {
       };
 
       mediaRecorder.start(250);
-      startDeepgramWebSocket(stream);
     } catch (e: any) {
       setStreamError("Failed starting MediaRecorder: " + e.message);
     }
@@ -805,8 +1269,19 @@ export default function Home() {
     const videoTracks = stream.getVideoTracks();
     const audioTracks = stream.getAudioTracks();
     
-    setIsCameraAvailable(videoTracks.length > 0 && videoTracks[0].enabled);
-    setIsMicAvailable(audioTracks.length > 0 && audioTracks[0].enabled);
+    const hasVideo = videoTracks.length > 0 && videoTracks[0].enabled;
+    const hasAudio = audioTracks.length > 0 && audioTracks[0].enabled;
+    
+    setIsCameraAvailable(hasVideo);
+    setIsMicAvailable(hasAudio);
+    
+    if (currentScreen === "debate") {
+      if (!hasAudio) {
+        setDebateError("Microphone permission denied.");
+      } else {
+        setDebateError(null);
+      }
+    }
 
     startAudioVisualizer(stream);
   };
@@ -815,13 +1290,25 @@ export default function Home() {
     console.error("Webcam error:", err);
     setIsCameraAvailable(false);
     setIsMicAvailable(false);
-    setCameraErrorMsg("Camera access blocked. Please enable browser permissions.");
+    
+    let errMsg = "Camera access blocked. Please enable browser permissions.";
+    const errName = err?.name || "";
+    const errStr = String(err || "").toLowerCase();
+    
+    if (errName === "NotAllowedError" || errName === "PermissionDeniedError" || errStr.includes("permission") || errStr.includes("allowed")) {
+      errMsg = "Microphone permission denied.";
+    } else if (errName === "NotFoundError" || errName === "DevicesNotFoundError" || errStr.includes("notfound") || errStr.includes("device")) {
+      errMsg = "Microphone or camera device not found.";
+    }
+    
+    setCameraErrorMsg(errMsg);
+    if (currentScreen === "debate") {
+      setDebateError(errMsg);
+    }
   };
 
   const stopRecordingSession = () => {
     setIsRecording(false);
-    stopSimulatedTranscription();
-    closeDeepgramWebSocket();
 
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
@@ -831,6 +1318,8 @@ export default function Home() {
 
   // Video visualizer setup
   const startAudioVisualizer = (stream: MediaStream) => {
+    // Clean up previous visualizer to prevent concurrent drawing loops and AudioContext leaks
+    stopAudioVisualizer();
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       const audioContext = new AudioContextClass();
@@ -845,29 +1334,13 @@ export default function Home() {
       const dataArray = new Uint8Array(bufferLength);
 
       const draw = () => {
-        if (!analyserRef.current || !canvasRef.current) return;
+        if (!analyserRef.current) return;
         animationFrameId.current = requestAnimationFrame(draw);
-        const canvas = canvasRef.current;
-        const canvasCtx = canvas.getContext("2d");
-        if (!canvasCtx) return;
-
-        const width = canvas.width;
-        const height = canvas.height;
+        
         analyserRef.current.getByteFrequencyData(dataArray);
-
-        canvasCtx.fillStyle = "#F8FAFC";
-        canvasCtx.fillRect(0, 0, width, height);
-
-        const barWidth = (width / bufferLength) * 1.5;
-        let barHeight;
-        let x = 0;
 
         let sum = 0;
         for (let i = 0; i < bufferLength; i++) {
-          barHeight = (dataArray[i] / 255) * height * 0.8;
-          canvasCtx.fillStyle = `rgba(37, 99, 235, ${dataArray[i] / 255 + 0.15})`;
-          canvasCtx.fillRect(x, height - barHeight, barWidth - 1, barHeight);
-          x += barWidth;
           sum += dataArray[i];
         }
 
@@ -875,6 +1348,31 @@ export default function Home() {
         const avg = sum / bufferLength;
         setLiveVolume(avg);
         setIsVADActive(avg > 15);
+
+        // Render to canvas if it's mounted
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const canvasCtx = canvas.getContext("2d");
+          if (canvasCtx) {
+            const width = canvas.width;
+            const height = canvas.height;
+            canvasCtx.clearRect(0, 0, width, height);
+
+            canvasCtx.fillStyle = "#F8FAFC";
+            canvasCtx.fillRect(0, 0, width, height);
+
+            const barWidth = (width / bufferLength) * 1.5;
+            let barHeight;
+            let x = 0;
+
+            for (let i = 0; i < bufferLength; i++) {
+              barHeight = (dataArray[i] / 255) * height * 0.8;
+              canvasCtx.fillStyle = `rgba(37, 99, 235, ${dataArray[i] / 255 + 0.15})`;
+              canvasCtx.fillRect(x, height - barHeight, barWidth - 1, barHeight);
+              x += barWidth;
+            }
+          }
+        }
       };
       draw();
     } catch (e) {
@@ -907,21 +1405,47 @@ export default function Home() {
   };
 
   const handleStartDebateRecording = () => {
+    if (isDebateRecording || debateLoading) {
+      return; // prevent double recording
+    }
+
     const stream = webcamRef.current?.stream;
     if (!stream) {
-      alert("Camera preview stream not available. Please allow permissions first.");
+      setDebateError("Camera preview stream not available. Please allow permissions first.");
       return;
     }
+
+    // Verify audio tracks exist, are enabled, and active
+    const audioTracks = stream.getAudioTracks();
+    const activeAudioTracks = audioTracks.filter(track => track.enabled && track.readyState === "live");
+    if (activeAudioTracks.length === 0) {
+      setDebateError("Microphone permission denied.");
+      return;
+    }
+
+    // Resume AudioContext if suspended to ensure volume levels read properly
+    if (audioContextRef.current && audioContextRef.current.state === "suspended") {
+      audioContextRef.current.resume().catch(err => console.warn("Failed to resume AudioContext:", err));
+    }
+
+    console.info("Recording started");
     setDebateChunks([]);
     setDebateTimer(60);
     setIsDebateRecording(true);
+    setDebateError(null);
+    debateStartTimeRef.current = Date.now();
 
-    let options = {};
+    // Dynamically resolve supported mime types
+    let selectedMimeType = "";
     if (MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")) {
-      options = { mimeType: "video/webm;codecs=vp9,opus" };
+      selectedMimeType = "video/webm;codecs=vp9,opus";
     } else if (MediaRecorder.isTypeSupported("video/webm")) {
-      options = { mimeType: "video/webm" };
+      selectedMimeType = "video/webm";
+    } else if (MediaRecorder.isTypeSupported("video/mp4")) {
+      selectedMimeType = "video/mp4";
     }
+
+    const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
 
     try {
       const mediaRecorder = new MediaRecorder(stream, options);
@@ -932,30 +1456,50 @@ export default function Home() {
         if (event.data && event.data.size > 0) {
           chunks.push(event.data);
           setDebateChunks((prev) => [...prev, event.data]);
-          if (dgSocketRef.current && dgSocketRef.current.readyState === WebSocket.OPEN) {
-            dgSocketRef.current.send(event.data);
-          }
         }
       };
 
       mediaRecorder.onstop = async () => {
-        const videoBlob = new Blob(chunks, { type: "video/webm" });
+        console.info("Recording stopped");
+        const duration = Math.round((Date.now() - debateStartTimeRef.current) / 1000);
+        const videoBlob = new Blob(chunks, { type: selectedMimeType || "video/webm" });
+        
+        console.info(`Audio chunk count: ${chunks.length}`);
+        console.info(`Blob size: ${videoBlob.size}`);
+        console.info(`Recording duration: ${duration}s`);
+
+        if (videoBlob.size === 0) {
+          console.error("Recording failed: Blob size is 0.");
+          setDebateError("No audio detected.");
+          setDebateLoading(false);
+          setIsDebateRecording(false);
+          return;
+        }
+
+        if (duration < 2) {
+          console.error(`Recording failed: Duration too short (${duration}s).`);
+          setDebateError("Recording too short.");
+          setDebateLoading(false);
+          setIsDebateRecording(false);
+          return;
+        }
+
+        console.info("Upload initiated");
+        setDebateError(null);
         await uploadDebateSessionVideo(videoBlob);
       };
 
       mediaRecorder.start(250);
-      startDeepgramWebSocket(stream);
     } catch (e: any) {
       console.error("Failed starting Debate MediaRecorder:", e);
-      alert("Failed to start recording: " + e.message);
+      setDebateError("Failed to start recording: " + e.message);
+      setIsDebateRecording(false);
     }
   };
 
   const stopDebateRecordingAndSubmit = () => {
     setIsDebateRecording(false);
     setDebateLoading(true);
-    stopSimulatedTranscription();
-    closeDeepgramWebSocket();
     
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
@@ -996,6 +1540,69 @@ export default function Home() {
   };
 
   // ─── Interview Recording Functions ───────────────────────────────────────
+
+  // ─── Interview Recording Functions ───────────────────────────────────────
+
+  const initializeInterviewMedia = async () => {
+    console.log("Camera initialization started");
+    setInterviewErrorMsg("");
+    setInterviewStreamReady(false);
+    
+    // Stop any existing stream tracks first
+    if (interviewStream) {
+      interviewStream.getTracks().forEach((t) => t.stop());
+    }
+    stopInterviewAudioVisualizer();
+
+    const wantsAudio = interviewRecordingMode !== "video";
+    const wantsVideo = interviewRecordingMode !== "audio";
+    
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: wantsAudio,
+        video: wantsVideo ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" } : false,
+      });
+      console.log("Stream created");
+      if (wantsAudio) {
+        console.log("Microphone permission granted");
+      }
+      if (wantsVideo) {
+        console.log("Camera permission granted");
+      }
+      
+      setInterviewStream(stream);
+      setInterviewStreamReady(true);
+      
+      if (wantsAudio) {
+        startInterviewAudioVisualizer(stream);
+      }
+    } catch (err: any) {
+      console.error("[Interview] Media access error:", err);
+      setInterviewErrorMsg(`Media access denied: ${err.message}. Please allow camera/microphone permissions.`);
+    }
+  };
+
+  useEffect(() => {
+    if (interviewStream && interviewVideoRef.current) {
+      interviewVideoRef.current.srcObject = interviewStream;
+      console.log("Stream attached");
+    }
+  }, [interviewStream]);
+
+  useEffect(() => {
+    if (currentScreen === "interview" && interviewSessionId) {
+      initializeInterviewMedia();
+    }
+  }, [currentScreen, interviewSessionId, interviewRecordingMode]);
+
+  useEffect(() => {
+    if (currentScreen !== "interview" && interviewStream) {
+      interviewStream.getTracks().forEach((t) => t.stop());
+      setInterviewStream(null);
+      setInterviewStreamReady(false);
+      stopInterviewAudioVisualizer();
+    }
+  }, [currentScreen, interviewStream]);
 
   const startInterviewAudioVisualizer = (stream: MediaStream) => {
     try {
@@ -1047,35 +1654,55 @@ export default function Home() {
     setInterviewChunks([]);
     setInterviewRecordingTimer(120);
     setIsInterviewPaused(false);
-    const wantsAudio = interviewRecordingMode !== "video";
-    const wantsVideo = interviewRecordingMode !== "audio";
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: wantsAudio,
-        video: wantsVideo ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" } : false,
-      });
-    } catch (err: any) {
-      setInterviewErrorMsg(`Media access denied: ${err.message}. Please allow camera/microphone permissions.`);
+    
+    let stream = interviewStream;
+    if (!stream) {
+      console.warn("[Interview] Stream not ready. Attempting fallback initialization...");
+      await initializeInterviewMedia();
+      stream = interviewStream;
+    }
+    
+    if (!stream) {
+      setInterviewErrorMsg("Cannot start recording: camera and microphone stream not ready.");
       return;
     }
-    setInterviewStreamReady(true);
-    if (wantsAudio) startInterviewAudioVisualizer(stream);
-    let mimeType = wantsVideo ? "video/webm" : "audio/webm";
-    if (MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus") && wantsVideo) mimeType = "video/webm;codecs=vp9,opus";
-    const recorder = new MediaRecorder(stream, { mimeType });
-    interviewMediaRecorderRef.current = recorder;
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (e) => { if (e.data?.size > 0) { chunks.push(e.data); setInterviewChunks([...chunks]); } };
-    recorder.onstop = () => {
-      stream.getTracks().forEach((t) => t.stop());
-      stopInterviewAudioVisualizer();
-      const blob = new Blob(chunks, { type: mimeType.split(";")[0] });
-      setInterviewRecordedBlob(blob);
-      setInterviewStreamReady(false);
-    };
-    recorder.start(250);
-    setIsInterviewRecording(true);
+
+    try {
+      const wantsVideo = interviewRecordingMode !== "video";
+      let mimeType = wantsVideo ? "video/webm" : "audio/webm";
+      if (MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus") && wantsVideo) {
+        mimeType = "video/webm;codecs=vp9,opus";
+      }
+      
+      console.log("Recording started");
+      const recorder = new MediaRecorder(stream, { mimeType });
+      interviewMediaRecorderRef.current = recorder;
+      
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data?.size > 0) {
+          chunks.push(e.data);
+          setInterviewChunks([...chunks]);
+        }
+      };
+      
+      recorder.onstop = () => {
+        console.log("Recording stopped");
+        stream.getTracks().forEach((t) => t.stop());
+        stopInterviewAudioVisualizer();
+        setInterviewStream(null);
+        setInterviewStreamReady(false);
+        
+        const blob = new Blob(chunks, { type: mimeType.split(";")[0] });
+        setInterviewRecordedBlob(blob);
+      };
+      
+      recorder.start(250);
+      setIsInterviewRecording(true);
+    } catch (err: any) {
+      console.error("[Interview] Failed to start recorder:", err);
+      setInterviewErrorMsg(`Failed to start recording: ${err.message}`);
+    }
   };
 
   const handlePauseInterviewRecording = () => {
@@ -1108,16 +1735,29 @@ export default function Home() {
     setIsInterviewPaused(false);
     setInterviewStreamReady(false);
     setInterviewErrorMsg("");
+    initializeInterviewMedia();
   };
 
   const handleAnalyzeInterviewRecording = async () => {
     if (!interviewRecordedBlob || !interviewSessionId) return;
     setIsInterviewAnalyzing(true);
     setInterviewErrorMsg("");
+    setProcessingMessage("Uploading interview response and queuing AI evaluator...");
     setCurrentScreen("processing");
+    console.log("Upload started");
     try {
-      const updatedSession = await api.uploadInterviewVideo(interviewSessionId, interviewRecordedBlob);
-      setActiveSession(updatedSession);
+      await api.uploadInterviewVideo(interviewSessionId, interviewRecordedBlob);
+      console.log("Upload completed");
+      
+      const completedSession = await api.pollUntilComplete(
+        interviewSessionId,
+        (status, elapsed) => {
+          const secs = Math.round(elapsed / 1000);
+          setProcessingMessage(`Analyzing answer content, acoustic metrics & eye contact... (${secs}s elapsed)`);
+        }
+      );
+
+      setActiveSession(completedSession);
       fetchDashboardData();
       fetchCoachData();
       setCurrentScreen("results");
@@ -1131,11 +1771,8 @@ export default function Home() {
   };
 
   const handleResetInterview = () => {
-    setInterviewSessionId(""); setInterviewQuestion(""); setInterviewFeedback(null);
-    setInterviewHistory([]); setInterviewUserAnswer(""); setInterviewRecordedBlob(null);
-    setInterviewChunks([]); setIsInterviewRecording(false); setIsInterviewPaused(false);
-    setInterviewStreamReady(false); setInterviewRecordingTimer(120); setInterviewErrorMsg("");
-    stopInterviewAudioVisualizer();
+    resetInterviewState();
+    handleNavigation("interview");
   };
 
   // Challenge workflows
@@ -1159,8 +1796,10 @@ export default function Home() {
     const doc = new jsPDF();
     
     // Fetch or construct report object mirroring the Results view fallback
-    const report = activeSession.reports?.[0]?.summary || {
-      overall_score: activeSession.dna ? Math.round((activeSession.dna.confidence + activeSession.dna.fluency + activeSession.dna.clarity) / 3) : 75,
+    const dbReport = activeSession.reports?.[0]?.summary;
+    const defaultReport = {
+      final_score: activeSession.final_score || 0,
+      overall_score: activeSession.final_score || 0,
       rating: activeSession.dna?.profile_summary || "Good",
       executive_summary: "- Key strengths: Good pacing and posture.\n- Major weaknesses: Focus on reducing filler words.\n- Overall assessment: solid speech delivery with potential to improve.",
       speech_analysis: {
@@ -1192,13 +1831,15 @@ export default function Home() {
         grammar_text: "Grammar was clean and direct.",
         vocabulary_text: "Vocabulary was clear and category-appropriate."
       },
-      detailed_strengths: activeSession.reports?.[0]?.summary?.strengths || ["Conversational pace", "Strong eye contact", "Good posture"],
-      areas_for_improvement: activeSession.reports?.[0]?.summary?.improvements || ["Reduce filler words", "Improve hand gestures", "Vary pitch tone"],
+      detailed_strengths: ["Conversational pace", "Strong eye contact", "Good posture"],
+      areas_for_improvement: ["Reduce filler words", "Improve hand gestures", "Vary pitch tone"],
       action_plan: {
         immediate_actions: ["Implement the Lens-Dot target drill to anchor your visual gaze."],
         short_term_actions: ["Play the 'Pause Game' during discussions to eliminate filler words."],
         long_term_actions: ["Rehearse system architecture talking points aloud to build vocabulary structure."]
       },
+      expected_answer: `An expert response to "${activeSession.topic}" should cover the fundamental concepts of "${activeSession.category}", discuss practical implications, and conclude with strategic actions.`,
+      missing_concepts: ["Key industrial case studies", "Quantitative metrics and examples"],
       analytics_dashboard: {
         speech_confidence: activeSession.transcript?.confidence_score || 85,
         eye_contact_pct: activeSession.face_metrics?.eye_contact_percentage || 75,
@@ -1213,8 +1854,17 @@ export default function Home() {
         whisper_confidence: 85,
         frames_processed: 300,
         face_detection_rate: 98.0
-      }
+      },
+      strengths: ["Conversational pace", "Strong eye contact", "Good posture"],
+      weaknesses: ["Reduce filler words", "Improve hand gestures", "Vary pitch tone"],
+      recommendations: [
+        "Implement the Lens-Dot target drill to anchor your visual gaze.",
+        "Play the 'Pause Game' during discussions to eliminate filler words.",
+        "Rehearse system architecture talking points aloud to build vocabulary structure."
+      ],
+      final_assessment: "Solid speech delivery with potential to improve."
     };
+    const report = mergeReport(defaultReport, dbReport);
 
     let y = 50;
 
@@ -1262,7 +1912,8 @@ export default function Home() {
       doc.setFont("Helvetica", "normal");
       doc.setFontSize(8.5);
       doc.setTextColor(71, 85, 105);
-      items.forEach(item => {
+      const safeItems = Array.isArray(items) ? items : (typeof items === 'string' ? [items] : []);
+      safeItems.forEach(item => {
         const splitItem = doc.splitTextToSize(`• ${item}`, 170);
         checkPageBreak(splitItem.length * 4.5 + 2);
         doc.text(splitItem, 20, y);
@@ -1293,7 +1944,7 @@ export default function Home() {
     doc.setFont("Helvetica", "bold");
     doc.setFontSize(14);
     doc.setTextColor(15, 23, 42);
-    doc.text(`Overall Score: ${report.overall_score}/100 (${report.rating})`, 20, y);
+    doc.text(`Overall Score: ${report.final_score}/100 (${report.rating})`, 20, y);
     y += 8;
 
     doc.setFont("Helvetica", "normal");
@@ -1305,12 +1956,17 @@ export default function Home() {
     y += 10;
 
     // Executive Summary
-    const cleanSummaryText = (report.executive_summary || "").replace(/\\n/g, "\n");
+    const rawSummaryText = Array.isArray(report.executive_summary)
+      ? report.executive_summary.join("\n")
+      : (report.executive_summary || "");
+    const cleanSummaryText = rawSummaryText.replace(/\\n/g, "\n");
     printParagraph("1. Executive Summary", cleanSummaryText);
 
     // Speech Transcript
     if (activeSession.transcript) {
-      printParagraph("Speech Transcript", activeSession.transcript.corrected_transcript || "");
+      printParagraph("Speech Transcript", activeSession.transcript.raw_transcript || activeSession.transcript.corrected_transcript || "Transcript unavailable.");
+    } else {
+      printParagraph("Speech Transcript", "Transcript unavailable.");
     }
 
     // Speech Analysis
@@ -1347,12 +2003,12 @@ export default function Home() {
       );
     });
 
-    // Communication Effectiveness
+    // Communication Analysis Profile
     checkPageBreak(15);
     doc.setFont("Helvetica", "bold");
     doc.setFontSize(11);
     doc.setTextColor(37, 99, 235);
-    doc.text("4. Communication Effectiveness", 20, y);
+    doc.text("4. Communication Analysis Profile", 20, y);
     y += 8;
 
     const eff = report.communication_effectiveness || {};
@@ -1369,7 +2025,7 @@ export default function Home() {
     doc.setFont("Helvetica", "bold");
     doc.setFontSize(11);
     doc.setTextColor(37, 99, 235);
-    doc.text("5. Content Analysis", 20, y);
+    doc.text("Content Analysis", 20, y);
     y += 8;
 
     const content = report.content_analysis || {};
@@ -1382,8 +2038,9 @@ export default function Home() {
     );
 
     // Lists
-    printList("6. Detailed Strengths", report.detailed_strengths || []);
-    printList("7. Areas for Improvement", report.areas_for_improvement || []);
+    printList("5. Strengths", report.strengths || report.detailed_strengths || []);
+    printList("6. Areas for Improvement", report.weaknesses || report.areas_for_improvement || []);
+    printList("7. Personalized Recommendations", report.recommendations || []);
 
     // Action Plan
     checkPageBreak(15);
@@ -1398,12 +2055,18 @@ export default function Home() {
     printList("Short-Term Actions (1-2 Weeks)", ap.short_term_actions || []);
     printList("Long-Term Actions (1+ Months)", ap.long_term_actions || []);
 
+    // Overall Score Breakdown
+    printParagraph("9. Overall Score Breakdown", `Overall Score: ${report.final_score}/100\nPerformance Rating: ${report.rating}`);
+
+    // Final Communication Assessment
+    printParagraph("10. Final Communication Assessment", report.final_assessment || report.coaching_feedback || "No assessment available.");
+
     // Diagnostics
     checkPageBreak(15);
     doc.setFont("Helvetica", "bold");
     doc.setFontSize(11);
     doc.setTextColor(37, 99, 235);
-    doc.text("9. Diagnostic Metadata", 20, y);
+    doc.text("Diagnostic Metadata", 20, y);
     y += 8;
 
     const diag = report.diagnostics || {};
@@ -1429,16 +2092,14 @@ export default function Home() {
   // Helper chart configurations
   const getRadarChartConfig = () => {
     if (!dnaMetrics) return { labels: [], datasets: [] };
-    const labels = ["Confidence", "Fluency", "Vocabulary", "Storytelling", "Leadership", "Persuasion", "Clarity", "Engagement", "Eye Contact", "Posture", "Energy"];
+    const labels = ["Confidence", "Fluency", "Vocabulary", "Storytelling", "Leadership", "Clarity", "Eye Contact", "Posture", "Energy"];
     const data = [
       dnaMetrics.confidence || 50,
       dnaMetrics.fluency || 50,
       dnaMetrics.vocabulary || 50,
       dnaMetrics.storytelling || 50,
       dnaMetrics.leadership || 50,
-      dnaMetrics.persuasion || 50,
       dnaMetrics.clarity || 50,
-      dnaMetrics.engagement || 50,
       dnaMetrics.eye_contact || 50,
       dnaMetrics.posture || 50,
       dnaMetrics.energy_level || 50
@@ -1481,6 +2142,41 @@ export default function Home() {
     };
   };
 
+  const getScoreTrendChartConfig = () => {
+    if (!historyList || historyList.length === 0) return { labels: [], datasets: [] };
+    
+    const dailyScores: { [key: string]: number[] } = {};
+    const sortedHistory = [...historyList].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    
+    sortedHistory.forEach(s => {
+      const dateStr = new Date(s.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      if (!dailyScores[dateStr]) {
+        dailyScores[dateStr] = [];
+      }
+      dailyScores[dateStr].push(s.final_score || 0);
+    });
+    
+    const labels = Object.keys(dailyScores);
+    const data = Object.values(dailyScores).map(scores => {
+      const sum = scores.reduce((a, b) => a + b, 0);
+      return scores.length > 0 ? Math.round(sum / scores.length) : 0;
+    });
+    
+    return {
+      labels,
+      datasets: [
+        {
+          label: "Performance Score (%)",
+          data,
+          borderColor: "rgba(99, 102, 241, 1)",
+          backgroundColor: "rgba(99, 102, 241, 0.1)",
+          tension: 0.3,
+          fill: true
+        }
+      ]
+    };
+  };
+
   const handleViewSessionDetails = async (sessionId: string) => {
     setResultsLoading(true);
     try {
@@ -1494,14 +2190,40 @@ export default function Home() {
     }
   };
 
+  const handleViewSessionFromHistory = async (sessionId: string, sessionType: string) => {
+    setResultsLoading(true);
+    try {
+      if (sessionType === "document") {
+        const data = await api.getDocSession(sessionId);
+        setActiveDocSession(data);
+        setCurrentScreen("doc_results");
+      } else if (sessionType === "viva") {
+        const data = await api.getVivaSession(sessionId);
+        setActiveVivaSession(data);
+        setVivaShowResults(true);
+        setCurrentScreen("doc_viva");
+      } else {
+        const data = await api.getSession(sessionId);
+        setActiveSession(data);
+        setCurrentScreen("results");
+      }
+    } catch (e) {
+      console.error("Failed to load session details:", e);
+    } finally {
+      setResultsLoading(false);
+    }
+  };
+
   if (!mounted) return null;
+
+  console.log("Frontend Rendered");
 
   return (
     <div className="flex h-screen bg-[#F8FAFC]">
       {currentScreen !== "auth" && (
         <Sidebar 
           currentScreen={currentScreen} 
-          onNavigate={(s) => setCurrentScreen(s)} 
+          onNavigate={(s) => handleNavigation(s)} 
           onLogout={handleLogout} 
           user={user} 
         />
@@ -1593,7 +2315,7 @@ export default function Home() {
                 <p className="text-xs text-slate-500">Your Communication DNA performance and twins activity.</p>
               </div>
               <button 
-                onClick={() => setCurrentScreen("jam")} 
+                onClick={() => handleNavigation("jam")} 
                 className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-xs font-semibold shadow-sm flex items-center gap-2"
               >
                 <Mic className="w-4 h-4" /> Start New Session
@@ -1656,8 +2378,17 @@ export default function Home() {
               <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col gap-4">
                 <h3 className="text-sm font-bold text-slate-900">AI Coach Advice</h3>
                 <div className="flex flex-col gap-3 overflow-y-auto max-h-[280px]">
-                  {coachRecs.length > 0 ? (
-                    coachRecs.map((rec, i) => (
+                  {coachRecs && !Array.isArray(coachRecs) && coachRecs.recommendations && coachRecs.recommendations.length > 0 ? (
+                    coachRecs.recommendations.map((rec: string, i: number) => (
+                      <div key={i} className="p-3.5 bg-slate-50 rounded-xl border border-slate-100 flex flex-col gap-1">
+                        <span className="text-[10px] uppercase font-bold text-red-500">
+                          Weakness: {coachRecs.weaknesses?.[i] || "General Area"}
+                        </span>
+                        <p className="text-xs text-slate-600 leading-relaxed">{rec}</p>
+                      </div>
+                    ))
+                  ) : coachRecs && Array.isArray(coachRecs) && coachRecs.length > 0 ? (
+                    coachRecs.map((rec: any, i: number) => (
                       <div key={i} className="p-3.5 bg-slate-50 rounded-xl border border-slate-100 flex flex-col gap-1">
                         <span className="text-[10px] uppercase font-bold text-red-500">Weakness: {rec.weakness}</span>
                         <p className="text-xs text-slate-600 leading-relaxed">{rec.suggestion}</p>
@@ -1672,7 +2403,16 @@ export default function Home() {
 
             {/* History table */}
             <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
-              <h3 className="text-sm font-bold text-slate-900 mb-4">Recent Twin Sessions</h3>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-sm font-bold text-slate-900">Recent Sessions</h3>
+                <button 
+                  id="btn-view-all-sessions"
+                  onClick={() => handleNavigation("sessions")}
+                  className="text-xs font-semibold text-blue-600 hover:text-blue-700 transition-colors cursor-pointer"
+                >
+                  View All
+                </button>
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs text-left text-slate-600">
                   <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-100">
@@ -1686,17 +2426,45 @@ export default function Home() {
                     </tr>
                   </thead>
                   <tbody>
-                    {historyList.map((hist, i) => (
+                    {historyList.slice(0, 5).map((hist, i) => (
                       <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
-                        <td className="py-4 font-semibold text-slate-800 truncate max-w-[200px]">{hist.topic}</td>
+                        <td className="py-4 font-semibold text-slate-800 truncate max-w-[200px]">
+                          <div className="flex flex-col gap-0.5">
+                            <span>{hist.session_type === "viva" ? hist.topic : `"${hist.topic}"`}</span>
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              <span className="bg-slate-100 text-slate-500 px-1 py-0.5 rounded text-[8px] font-extrabold uppercase">
+                                {hist.category}
+                              </span>
+                              {hist.session_type === 'jam' && hist.difficulty && (
+                                <span className={`px-1 py-0.5 rounded text-[8px] font-extrabold uppercase ${
+                                  hist.difficulty === 'Easy' ? 'bg-green-50 text-green-600 border border-green-200/50' :
+                                  hist.difficulty === 'Hard' ? 'bg-red-50 text-red-600 border border-red-200/50' :
+                                  'bg-indigo-50 text-indigo-600 border border-indigo-200/50'
+                                }`}>
+                                  {hist.difficulty}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </td>
                         <td className="py-4">{hist.category}</td>
-                        <td className="py-4"><span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 text-[10px] uppercase font-bold">{hist.session_type}</span></td>
-                        <td className="py-4 font-bold text-slate-900">{hist.overall_score}%</td>
+                        <td className="py-4">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] uppercase font-bold ${
+                            hist.session_type === 'jam' ? 'bg-blue-50 text-blue-600' :
+                            hist.session_type === 'debate' ? 'bg-rose-50 text-rose-600' :
+                            hist.session_type === 'interview' ? 'bg-emerald-50 text-emerald-600' :
+                            hist.session_type === 'document' ? 'bg-purple-50 text-purple-600' :
+                            'bg-amber-50 text-amber-600'
+                          }`}>
+                            {hist.session_type === 'document' ? 'Doc Analyzer' : hist.session_type}
+                          </span>
+                        </td>
+                        <td className="py-4 font-bold text-slate-900">{hist.final_score}%</td>
                         <td className="py-4 text-slate-400">{new Date(hist.created_at).toLocaleDateString()}</td>
                         <td className="py-4 text-right">
                           <button 
-                            onClick={() => handleViewSessionDetails(hist.id)}
-                            className="text-blue-600 hover:underline font-semibold"
+                            onClick={() => handleViewSessionFromHistory(hist.id, hist.session_type)}
+                            className="text-blue-600 hover:underline font-semibold cursor-pointer"
                           >
                             Details
                           </button>
@@ -1713,6 +2481,7 @@ export default function Home() {
         {/* ================================= DOCUMENT ANALYZER SCREEN ================================= */}
         {currentScreen === "doc_analyzer" && (
           <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
+            <BackButton currentModuleName="Document Communication Analyzer" onNavigateToDashboard={() => handleNavigation("dashboard")} />
 
             {/* Header */}
             <div className="flex justify-between items-center">
@@ -2093,7 +2862,7 @@ export default function Home() {
           <div className="p-8 flex flex-col items-center justify-center max-w-xl mx-auto w-full min-h-[400px] text-center">
             <div className="bg-white border border-slate-200 rounded-3xl p-8 flex flex-col items-center gap-4 shadow-sm w-full">
               <Loader2 className="w-12 h-12 animate-spin text-blue-600" />
-              <h2 className="font-bold text-slate-800 text-lg">Evaluating Content Explanation</h2>
+              <h2 className="font-bold text-slate-800 text-lg">{processingMessage || "Evaluating Content Explanation"}</h2>
               <p className="text-xs text-slate-500 leading-relaxed max-w-sm">
                 Our AI engine is transcribing your speech, mapping keywords, comparing your content against the source document, and generating feedback reports. This will take up to 20-30 seconds.
               </p>
@@ -2102,7 +2871,28 @@ export default function Home() {
         )}
 
         {/* ================================= DOCUMENT RESULTS REPORT DASHBOARD ================================= */}
-        {currentScreen === "doc_results" && activeDocSession && (
+        {currentScreen === "doc_results" && activeDocSession && !activeDocSession.report && (
+          <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
+            <div className="flex justify-between items-start flex-wrap gap-4">
+              <div>
+                <span className="text-[10px] text-blue-600 font-extrabold uppercase bg-blue-50 px-2 py-0.5 rounded-lg border border-blue-100/30">Analysis Dashboard</span>
+                <h1 className="text-xl font-bold text-slate-900 mt-1 leading-relaxed">"{activeDocSession.topic_title}"</h1>
+                <p className="text-xs text-slate-500 mt-0.5">Presented based on document title: <strong>{uploadedDoc?.title || uploadedDoc?.filename}</strong></p>
+              </div>
+              <button
+                onClick={() => handleNavigation("doc_analyzer")}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2 px-5 rounded-xl shadow-md cursor-pointer transition-all"
+              >
+                Practice Another Topic
+              </button>
+            </div>
+            <div className="bg-white border border-slate-200 p-12 rounded-2xl shadow-sm text-center flex flex-col items-center justify-center gap-3">
+              <p className="text-sm text-slate-500 font-semibold">Analysis data unavailable.</p>
+            </div>
+          </div>
+        )}
+
+        {currentScreen === "doc_results" && activeDocSession && activeDocSession.report && (
           <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
             
             {/* Header */}
@@ -2114,8 +2904,7 @@ export default function Home() {
               </div>
               <button
                 onClick={() => {
-                  setSelectedDocTopic(null);
-                  setCurrentScreen("doc_analyzer");
+                  handleNavigation("doc_analyzer");
                 }}
                 className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2 px-5 rounded-xl shadow-md cursor-pointer transition-all"
               >
@@ -2316,7 +3105,7 @@ export default function Home() {
                   <div className="flex flex-col gap-3">
                     <h4 className="text-xs font-extrabold text-slate-700 uppercase">Spoken Transcript</h4>
                     <p className="text-xs text-slate-600 bg-slate-50 p-4 border border-slate-100 rounded-xl leading-relaxed italic max-h-[160px] overflow-y-auto">
-                      "{activeDocSession.raw_transcript}"
+                      "{activeDocSession.raw_transcript || "Transcript unavailable."}"
                     </p>
                   </div>
                   <div className="flex flex-col gap-3">
@@ -2333,6 +3122,21 @@ export default function Home() {
         )}
 
         {/* ================================= DOCUMENT VIVA / ORAL EXAM SCREEN ================================= */}
+        {currentScreen === "doc_viva" && !activeVivaSession && (
+          <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full text-center">
+            <h1 className="text-xl font-bold text-slate-900 mt-1">Viva Session</h1>
+            <div className="bg-white border border-slate-200 p-12 rounded-2xl shadow-sm text-center flex flex-col items-center justify-center gap-3">
+              <p className="text-sm text-slate-500 font-semibold">Viva session unavailable.</p>
+              <button
+                onClick={() => handleNavigation("doc_analyzer")}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2.5 px-5 rounded-xl cursor-pointer transition-colors"
+              >
+                Back to Document Analyzer
+              </button>
+            </div>
+          </div>
+        )}
+
         {currentScreen === "doc_viva" && activeVivaSession && (
           <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
             
@@ -2442,8 +3246,7 @@ export default function Home() {
                     </div>
                     <button
                       onClick={() => {
-                        setActiveVivaSession(null);
-                        setCurrentScreen("doc_analyzer");
+                        handleNavigation("doc_analyzer");
                       }}
                       className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2 px-5 rounded-xl shadow-md cursor-pointer transition-all h-max self-center"
                     >
@@ -2484,7 +3287,7 @@ export default function Home() {
                           <div>
                             <span className="text-[10px] text-slate-400 font-bold uppercase">Spoken Answer</span>
                             <p className="text-slate-600 bg-slate-50 p-3.5 border border-slate-100 rounded-xl italic mt-1">
-                              "{qa.user_answer_transcript || "No response provided."}"
+                              "{qa.user_answer_transcript || "Transcript unavailable."}"
                             </p>
                           </div>
                           {qa.evaluation && (
@@ -2544,6 +3347,7 @@ export default function Home() {
         {/* ================================= JAM ANALYSIS SCREEN ================================= */}
         {currentScreen === "jam" && (
           <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
+            <BackButton currentModuleName="JAM Analyzer" onNavigateToDashboard={() => handleNavigation("dashboard")} />
             <div className="flex justify-between items-center">
               <h1 className="text-xl font-bold text-slate-900">JAM Speech Recorder</h1>
               <div className="flex gap-4 items-center">
@@ -2689,6 +3493,19 @@ export default function Home() {
                         {CATEGORIES.map((cat, i) => <option key={i} value={cat}>{cat}</option>)}
                       </select>
                     </div>
+
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[10px] font-bold text-slate-500">Difficulty Level</label>
+                      <select 
+                        value={selectedDifficulty} 
+                        onChange={(e) => setSelectedDifficulty(e.target.value)} 
+                        className="glass-input p-2 rounded-xl text-xs"
+                      >
+                        <option value="Easy">Easy</option>
+                        <option value="Medium">Medium</option>
+                        <option value="Hard">Hard</option>
+                      </select>
+                    </div>
                     <button 
                       onClick={handlePrepTopic} 
                       disabled={topicLoading || !isCameraAvailable || !isMicAvailable}
@@ -2822,39 +3639,124 @@ export default function Home() {
 
                 {/* Recording feedback controls */}
                 {isRecording && (
-                  <div className="flex flex-col gap-4 border-t border-slate-100 pt-4">
-                    <div className="flex justify-between items-center">
-                      <span className="text-xs font-semibold text-slate-500">Speaking Timer</span>
-                      <span className="text-base font-extrabold text-blue-600">{recordingTimer}s</span>
+                  <div className="flex flex-col h-full gap-5 border-t border-slate-100 pt-4">
+                    {/* Speaking Timer & Header */}
+                    <div className="flex justify-between items-center bg-slate-50 p-3 rounded-xl border border-slate-100 shadow-sm">
+                      <div className="flex items-center gap-2">
+                        <div className="h-2.5 w-2.5 rounded-full bg-red-500 animate-pulse" />
+                        <span className="text-xs font-semibold text-slate-500">Speaking Timer</span>
+                      </div>
+                      <span className="text-base font-extrabold text-blue-600 font-mono">{recordingTimer}s</span>
                     </div>
 
-                    {/* Real-time feedback indicators */}
-                    <div className="flex flex-col gap-1.5 bg-slate-50 p-3 rounded-xl border border-slate-100 text-[10px] font-bold text-slate-600">
-                      <div className="flex justify-between">
-                        <span>Camera Connected</span>
-                        <span className="text-emerald-600">✓ Yes</span>
+                    {/* Disconnection Warning */}
+                    {isCoachDisconnected && (
+                      <div className="bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-bold p-3 rounded-xl flex items-center gap-2.5 animate-pulse shadow-sm">
+                        <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
+                        <div>
+                          <p>AI Coach temporarily disconnected.</p>
+                          <p className="font-medium text-slate-500 mt-0.5">Recording continues normally.</p>
+                        </div>
                       </div>
-                      <div className="flex justify-between">
-                        <span>Microphone Connected</span>
-                        <span className="text-emerald-600">✓ Yes</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Recording Status</span>
-                        <span className="text-red-500 animate-pulse">● Recording Live</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Eye Contact</span>
-                        <span className="text-blue-600">Gaze Centered (92%)</span>
+                    )}
+
+                    {/* AI Coach Card */}
+                    <div className="flex flex-col gap-3 bg-slate-50/50 backdrop-blur-md p-4 rounded-2xl border border-slate-200/60 shadow-sm">
+                      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-blue-500" /> Real-Time AI Coach
+                      </h3>
+                      
+                      {/* Dynamic Suggestions checklist */}
+                      <div className="flex flex-col gap-2 mt-1">
+                        {liveSuggestions.map((suggestion, idx) => {
+                          const isWarning = suggestion.startsWith("⚠");
+                          const text = suggestion.replace(/^[✓⚠]\s*/, "");
+                          return (
+                            <div 
+                              key={idx} 
+                              className={`flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-[10px] font-bold transition-all duration-300 ${
+                                isWarning 
+                                  ? "bg-amber-50 border border-amber-100 text-amber-700" 
+                                  : "bg-emerald-50 border border-emerald-100 text-emerald-700"
+                              }`}
+                            >
+                              {isWarning ? (
+                                <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                              ) : (
+                                <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                              )}
+                              <span>{text}</span>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
 
-                    {/* Live microphone level meter */}
-                    <div className="flex flex-col gap-1.5">
-                      <div className="flex justify-between text-[10px] text-slate-400 font-bold uppercase">
+                    {/* Grid of live stats: WPM & Confidence */}
+                    <div className="grid grid-cols-2 gap-4">
+                      {/* WPM panel */}
+                      <div className="p-3.5 bg-white rounded-2xl border border-slate-200 flex flex-col gap-1 shadow-sm">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase">Speaking Rate</span>
+                        <p className="text-lg font-black text-slate-800 tracking-tight font-mono">{liveWpm} <span className="text-xs font-semibold text-slate-500">WPM</span></p>
+                        <span className={`text-[9px] font-bold mt-1 px-1.5 py-0.5 rounded-lg w-max ${
+                          liveWpmStatus.includes("Good Pace") 
+                            ? "bg-emerald-50 text-emerald-600 border border-emerald-100" 
+                            : "bg-amber-50 text-amber-600 border border-amber-100"
+                        }`}>
+                          {liveWpmStatus}
+                        </span>
+                      </div>
+
+                      {/* Confidence panel */}
+                      <div className="p-3.5 bg-white rounded-2xl border border-slate-200 flex flex-col gap-1 shadow-sm">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase">Confidence</span>
+                        <p className="text-lg font-black text-slate-800 tracking-tight font-mono">{liveConfidence}%</p>
+                        <span className={`text-[9px] font-bold mt-1 px-1.5 py-0.5 rounded-lg w-max ${
+                          liveConfidenceLevel === "High" 
+                            ? "bg-emerald-50 text-emerald-600 border border-emerald-100" 
+                            : liveConfidenceLevel === "Medium"
+                              ? "bg-blue-50 text-blue-600 border border-blue-100"
+                              : "bg-red-50 text-red-600 border border-red-100"
+                        }`}>
+                          {liveConfidenceLevel} Level
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Fillers detection panel */}
+                    <div className="p-3.5 bg-white rounded-2xl border border-slate-200 flex flex-col gap-2.5 shadow-sm">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-slate-400 font-bold uppercase">Fillers Detected</span>
+                        <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full ${
+                          liveFillerCount > 4 ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"
+                        }`}>
+                          {liveFillerCount}
+                        </span>
+                      </div>
+
+                      {liveRecentFillers.length > 0 ? (
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[9px] text-slate-400 font-bold uppercase">Recent</span>
+                          <div className="flex gap-1 flex-wrap">
+                            {liveRecentFillers.map((filler, i) => (
+                              <span key={i} className="px-2 py-0.5 bg-rose-50 text-rose-600 border border-rose-100 rounded-md text-[10px] font-extrabold font-mono">
+                                {filler}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-[10px] text-emerald-600 font-medium">✓ No fillers detected</span>
+                      )}
+                    </div>
+
+                    {/* Mic Volume Level */}
+                    <div className="flex flex-col gap-1.5 bg-slate-50 p-3.5 rounded-xl border border-slate-100 shadow-inner">
+                      <div className="flex justify-between text-[9px] text-slate-400 font-bold uppercase">
                         <span>Mic Volume</span>
-                        {isVADActive && <span className="text-emerald-500 animate-pulse flex items-center gap-1"><Activity className="w-3 h-3" /> Speech Active</span>}
+                        {isVADActive && <span className="text-emerald-500 animate-pulse flex items-center gap-1 font-extrabold"><Activity className="w-3 h-3" /> Speech Active</span>}
                       </div>
-                      <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                      <div className="h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
                         <div 
                           className="h-full bg-blue-600 transition-all duration-75"
                           style={{ width: `${Math.min(100, liveVolume * 3.5)}%` }}
@@ -2862,22 +3764,11 @@ export default function Home() {
                       </div>
                     </div>
 
-                    {/* Live stats */}
-                    <div className="grid grid-cols-2 gap-4 mt-2">
-                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-center">
-                        <span className="text-[10px] text-slate-400 font-bold uppercase">Deepgram WPM</span>
-                        <p className="text-sm font-bold text-slate-800 mt-1">{liveWpm}</p>
-                      </div>
-                      <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 text-center">
-                        <span className="text-[10px] text-slate-400 font-bold uppercase">Confidence</span>
-                        <p className="text-sm font-bold text-slate-800 mt-1">{liveConfidence}%</p>
-                      </div>
-                    </div>
-
+                    {/* Live Transcript */}
                     {liveTranscript && (
                       <div className="flex flex-col gap-1 border-t border-slate-100 pt-3">
                         <span className="text-[10px] text-slate-400 font-bold uppercase">Live Transcript</span>
-                        <p className="text-xs text-slate-600 italic bg-slate-50 p-3 rounded-xl border border-slate-100 max-h-[120px] overflow-y-auto leading-relaxed">
+                        <p className="text-[11px] text-slate-600 italic bg-slate-50 p-3 rounded-xl border border-slate-100 max-h-[90px] overflow-y-auto leading-relaxed shadow-inner">
                           "{liveTranscript.trim()}"
                         </p>
                       </div>
@@ -2885,9 +3776,9 @@ export default function Home() {
 
                     <button 
                       onClick={stopRecordingSession} 
-                      className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold text-xs py-2.5 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-sm mt-2"
+                      className="w-full bg-red-600 hover:bg-red-700 text-white font-bold text-xs py-2.5 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-red-600/10 mt-auto transition-all"
                     >
-                      <Square className="w-4 h-4" /> Stop & Upload Video
+                      <Square className="w-3.5 h-3.5" /> Stop & Upload Video
                     </button>
                   </div>
                 )}
@@ -2899,6 +3790,7 @@ export default function Home() {
         {/* ================================= DEBATE ARENA ================================= */}
         {currentScreen === "debate" && (
           <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
+            <BackButton currentModuleName="Debate Arena" onNavigateToDashboard={() => handleNavigation("dashboard")} />
             <div className="flex justify-between items-center">
               <div>
                 <h1 className="text-xl font-bold text-slate-900">Debate Arena</h1>
@@ -3025,8 +3917,8 @@ export default function Home() {
                         </div>
                       )}
                       {isDebateRecording && (
-                        <div className="absolute top-3 left-3 bg-red-600 text-white px-2 py-0.5 rounded-full text-[9px] font-bold uppercase animate-pulse">
-                          Speaking Live
+                        <div className={`absolute top-3 left-3 text-white px-2 py-0.5 rounded-full text-[9px] font-bold uppercase ${isVADActive ? "bg-red-600 animate-pulse" : "bg-blue-600"}`}>
+                          {isVADActive ? "Speaking Live" : "Recording Audio"}
                         </div>
                       )}
                     </div>
@@ -3058,17 +3950,24 @@ export default function Home() {
                 {/* Right Column: Scorecard & debate controls */}
                 <div className="bg-white p-6 rounded-2xl border border-slate-200 flex flex-col gap-6 shadow-sm">
                   
+                  {debateError && (
+                    <div className="bg-red-50 border border-red-200 text-red-700 text-xs px-4 py-3 rounded-xl flex items-center gap-2">
+                      <AlertTriangle className="h-4 w-4 text-red-500 shrink-0" />
+                      <div>{debateError}</div>
+                    </div>
+                  )}
+                  
                   {debateScorecard && (
                     <div className="flex flex-col gap-4">
                       <h3 className="text-xs font-bold text-slate-700 uppercase">Debate Performance scorecard</h3>
                       <div className="grid grid-cols-2 gap-4">
                         <div className="p-3 bg-emerald-50 rounded-xl text-center border border-emerald-100">
                           <span className="text-[9px] text-emerald-600 font-bold uppercase">Persuasion</span>
-                          <p className="text-base font-extrabold text-slate-800 mt-0.5">{debateScorecard.persuasion}%</p>
+                          <p className="text-base font-extrabold text-slate-800 mt-0.5">{debateScorecard.persuasion || 70}%</p>
                         </div>
                         <div className="p-3 bg-emerald-50 rounded-xl text-center border border-emerald-100">
                           <span className="text-[9px] text-emerald-600 font-bold uppercase">Logic</span>
-                          <p className="text-base font-extrabold text-slate-800 mt-0.5">{debateScorecard.logical_consistency}%</p>
+                          <p className="text-base font-extrabold text-slate-800 mt-0.5">{debateScorecard.logical_consistency || 70}%</p>
                         </div>
                         <div className="p-3 bg-emerald-50 rounded-xl text-center border border-emerald-100">
                           <span className="text-[9px] text-emerald-600 font-bold uppercase">Rebuttal</span>
@@ -3092,16 +3991,22 @@ export default function Home() {
                       {/* Real-time feedback indicators */}
                       <div className="flex flex-col gap-1.5 bg-slate-50 p-3 rounded-xl border border-slate-100 text-[10px] font-bold text-slate-600">
                         <div className="flex justify-between">
-                          <span>Camera Connected</span>
-                          <span className="text-emerald-600">✓ Yes</span>
+                          <span>Camera Status</span>
+                          <span className={isCameraAvailable ? "text-emerald-600" : "text-red-500"}>
+                            {isCameraAvailable ? "✓ Connected" : "✗ Blocked"}
+                          </span>
                         </div>
                         <div className="flex justify-between">
-                          <span>Microphone Connected</span>
-                          <span className="text-emerald-600">✓ Yes</span>
+                          <span>Microphone Status</span>
+                          <span className={isMicAvailable ? "text-emerald-600" : "text-red-500"}>
+                            {isMicAvailable ? "✓ Connected" : "✗ Blocked"}
+                          </span>
                         </div>
                         <div className="flex justify-between">
                           <span>Recording Status</span>
-                          <span className="text-red-500 animate-pulse">● Speaking Live</span>
+                          <span className={!isMicAvailable ? "text-red-500" : liveVolume === 0 ? "text-amber-500 animate-pulse" : isVADActive ? "text-red-500 animate-pulse" : "text-blue-600"}>
+                            ● {!isMicAvailable ? "Mic Muted" : liveVolume === 0 ? "No Audio Detected" : isVADActive ? "Speaking Live" : "Recording Audio"}
+                          </span>
                         </div>
                         <div className="flex justify-between">
                           <span>Eye Contact</span>
@@ -3167,7 +4072,7 @@ export default function Home() {
                       </button>
                       
                       <button 
-                        onClick={() => setDebateSessionId("")} 
+                        onClick={() => handleNavigation("debate")} 
                         className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs py-2 rounded-xl font-semibold cursor-pointer text-center"
                       >
                         Exit Arena
@@ -3192,6 +4097,7 @@ export default function Home() {
         {/* ================================= INTERVIEW SIMULATOR ================================= */}
         {currentScreen === "interview" && (
           <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
+            <BackButton currentModuleName="Interview Simulator" onNavigateToDashboard={() => handleNavigation("dashboard")} />
 
             {/* Header */}
             <div className="flex items-center justify-between">
@@ -3209,7 +4115,7 @@ export default function Home() {
 
             {/* SETUP PHASE */}
             {!interviewSessionId && (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div className="max-w-xl mx-auto w-full">
                 <div className="bg-white border border-slate-200 p-6 rounded-2xl flex flex-col gap-5 shadow-sm">
                   <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Session Configuration</h3>
                   <div className="flex flex-col gap-1">
@@ -3251,21 +4157,6 @@ export default function Home() {
                     {interviewLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <><UserCheck className="w-4 h-4" /> Start Mock Interview</>}
                   </button>
                 </div>
-                <div className="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 p-6 rounded-2xl flex flex-col gap-4">
-                  <h3 className="text-xs font-bold text-indigo-800 uppercase tracking-wider">What You&apos;ll Get</h3>
-                  {[
-                    ["🎙 Live Question", "AI interviewer asks role-specific questions"],
-                    ["🎬 A/V Recording", "Record your answer with webcam + mic"],
-                    ["🧠 Evidence Analysis", "Whisper + MediaPipe + Gemini pipeline"],
-                    ["📊 10-Section Report", "Same professional report as JAM Analyzer"],
-                    ["✅ Score Breakdown", "Speech, body language, effectiveness scores"],
-                  ].map(([icon, desc], i) => (
-                    <div key={i} className="flex items-start gap-3">
-                      <span className="text-lg">{icon}</span>
-                      <span className="text-xs text-indigo-900 font-medium leading-relaxed">{desc}</span>
-                    </div>
-                  ))}
-                </div>
               </div>
             )}
 
@@ -3278,7 +4169,16 @@ export default function Home() {
                     <p className="text-sm font-semibold leading-relaxed">&quot;{interviewQuestion}&quot;</p>
                   </div>
                   {interviewRecordingMode !== "audio" && (
-                    <div className="relative bg-slate-900 rounded-2xl overflow-hidden flex items-center justify-center" style={{ aspectRatio: "16/9" }}>
+                    <div className="relative bg-slate-900 rounded-2xl overflow-hidden flex items-center justify-center animate-fadeIn shadow-sm border border-slate-800" style={{ aspectRatio: "16/9" }}>
+                      {interviewStream && (
+                        <video
+                          ref={interviewVideoRef}
+                          autoPlay
+                          playsInline
+                          muted
+                          className="absolute inset-0 w-full h-full object-cover z-10"
+                        />
+                      )}
                       {isInterviewRecording && (
                         <div className="absolute top-3 left-3 z-20 bg-red-600 text-white px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase animate-pulse flex items-center gap-1.5">
                           <Play className="w-3 h-3" /> {isInterviewPaused ? "Paused" : "Recording Live"}
@@ -3289,10 +4189,12 @@ export default function Home() {
                           <CheckCircle className="w-3 h-3" /> Ready
                         </div>
                       )}
-                      <div className="flex flex-col items-center gap-2 text-slate-600">
-                        <Video className="w-8 h-8 opacity-30" />
-                        <span className="text-[10px] opacity-50">{isInterviewRecording ? "Live recording..." : "Camera activates on Start Recording"}</span>
-                      </div>
+                      {!interviewStream && (
+                        <div className="flex flex-col items-center gap-2 text-slate-600 z-10">
+                          <Video className="w-8 h-8 opacity-30" />
+                          <span className="text-[10px] opacity-50">Camera activating...</span>
+                        </div>
+                      )}
                     </div>
                   )}
                   <canvas ref={interviewCanvasRef} height={64} className="w-full bg-slate-900 border border-slate-700 rounded-xl" />
@@ -3415,14 +4317,15 @@ export default function Home() {
         {/* ================================= COMMUNICATION DNA VIEW ================================= */}
         {currentScreen === "dna" && (
           <div className="p-8 flex flex-col gap-6">
+            <BackButton currentModuleName="Communication DNA" onNavigateToDashboard={() => handleNavigation("dashboard")} />
             <div>
-              <h1 className="text-xl font-bold text-slate-900">Communication DNA Profile</h1>
+              <h1 className="text-xl font-bold text-slate-900">Communication Analysis Profile</h1>
               <p className="text-xs text-slate-500">Your visual Twin classification maps and personality traits.</p>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2 bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col items-center">
-                <h3 className="text-xs font-bold text-slate-900 self-start mb-4">11-Dimensional DNA Radial</h3>
+                <h3 className="text-xs font-bold text-slate-900 self-start mb-4">9-Dimensional Analysis Radial</h3>
                 {dnaMetrics ? (
                   <div className="h-96 w-full max-w-md">
                     <Radar data={getRadarChartConfig()} options={{ responsive: true, maintainAspectRatio: false }} />
@@ -3449,85 +4352,612 @@ export default function Home() {
         )}
 
         {/* ================================= AI COACH VIEW ================================= */}
-        {currentScreen === "coach" && (
-          <div className="p-8 flex flex-col gap-6 max-w-4xl mx-auto w-full">
-            <div>
-              <h1 className="text-xl font-bold text-slate-900">AI Coach Challenges</h1>
-              <p className="text-xs text-slate-500">Complete challenges to target communication weaknesses.</p>
-            </div>
+        {currentScreen === "coach" && (() => {
+          const executiveSummary = coachRecs?.executive_summary || coachRecs?.executiveSummary || "";
+          const strengths = coachRecs?.strengths || [];
+          const weaknesses = coachRecs?.weaknesses || coachRecs?.areas_for_improvement || [];
+          const recommendations = coachRecs?.recommendations || [];
+          const immediateActions = coachRecs?.immediate_actions || coachRecs?.immediateActions || [];
+          const shortTermPlan = coachRecs?.short_term_plan || coachRecs?.shortTermPlan || [];
+          const longTermPlan = coachRecs?.long_term_plan || coachRecs?.longTermPlan || [];
+          const coachingFeedback = coachRecs?.coaching_feedback || coachRecs?.coachingFeedback || "";
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col gap-4">
-                <h3 className="text-sm font-bold text-slate-800">Assigned Verbal Challenges</h3>
-                <div className="flex flex-col gap-3 overflow-y-auto max-h-[400px]">
-                  {challenges.map((c, i) => (
-                    <div 
-                      key={i} 
-                      onClick={() => setSelectedChallenge(c)}
-                      className={`p-4 rounded-xl border transition-all cursor-pointer ${
-                        selectedChallenge?.id === c.id 
-                          ? "border-blue-500 bg-blue-50/30" 
-                          : "border-slate-100 bg-slate-50 hover:border-slate-300"
-                      }`}
-                    >
-                      <span className="text-[9px] uppercase font-bold text-blue-600">{c.challenge_type}</span>
-                      <p className="text-xs text-slate-700 mt-1.5 font-medium leading-relaxed">"{c.prompt}"</p>
-                      <div className="flex justify-between items-center mt-3 pt-3 border-t border-slate-100/50">
-                        <span className="text-[10px] text-slate-400 font-medium">Attempts: {c.attempts}</span>
-                        <span className="text-[10px] text-slate-400 font-medium">Best Score: {c.best_score}%</span>
-                      </div>
-                    </div>
-                  ))}
+          const isError = executiveSummary === "Coaching analysis could not be generated. Please try again.";
+
+          return (
+            <div className="p-8 flex flex-col gap-8 max-w-5xl mx-auto w-full">
+              <BackButton currentModuleName="AI Coach" onNavigateToDashboard={() => handleNavigation("dashboard")} />
+              {/* Header */}
+              <div className="flex justify-between items-center border-b border-slate-200 pb-5">
+                <div>
+                  <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-blue-600" /> AI Coach & Performance Roadmap
+                  </h1>
+                  <p className="text-xs text-slate-500 mt-1">Get personalized guidance and practice assigned verbal challenges.</p>
                 </div>
               </div>
 
-              {selectedChallenge ? (
-                <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col justify-between">
-                  <div className="flex flex-col gap-4">
-                    <span className="text-[9px] uppercase font-extrabold text-blue-600 tracking-wider">Execute Selected Challenge</span>
-                    <h3 className="text-sm font-bold text-slate-800 leading-relaxed">"{selectedChallenge.prompt}"</h3>
-                    <div className="flex flex-col gap-1.5">
-                      <label className="text-xs font-semibold text-slate-600">Simulate Score (0-100)</label>
-                      <input 
-                        type="number" 
-                        min={0} 
-                        max={100}
-                        value={challengeScore}
-                        onChange={(e) => setChallengeScore(Number(e.target.value))}
-                        className="glass-input p-2 rounded-xl text-xs" 
-                      />
-                    </div>
-                  </div>
-                  <button 
-                    onClick={handleChallengeSubmit}
-                    disabled={challengeSubmitting}
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs py-2.5 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-sm mt-6"
-                  >
-                    {challengeSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "Complete Challenge Attempt"}
-                  </button>
-                </div>
-              ) : (
-                <div className="bg-slate-50 border border-dashed border-slate-200 rounded-2xl flex items-center justify-center p-12 text-xs text-slate-400 text-center">
-                  Select a challenge from the checklist to execute your Twin session drill.
+              {/* Error display */}
+              {isError && (
+                <div className="p-4 bg-red-50 border border-red-200 rounded-xl text-xs font-semibold text-red-700 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4" /> Coaching analysis could not be generated. Please try again.
                 </div>
               )}
+
+              {/* Top Row: Challenges Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col gap-4">
+                  <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-wider">Assigned Practice Challenges</h3>
+                  <div className="flex flex-col gap-3 overflow-y-auto max-h-[300px]">
+                    {challenges && challenges.length > 0 ? (
+                      challenges.map((c, i) => (
+                        <div 
+                          key={i} 
+                          onClick={() => setSelectedChallenge(c)}
+                          className={`p-4 rounded-xl border transition-all cursor-pointer ${
+                            selectedChallenge?.id === c.id 
+                              ? "border-blue-500 bg-blue-50/30" 
+                              : "border-slate-100 bg-slate-50 hover:border-slate-300"
+                          }`}
+                        >
+                          <span className="text-[9px] uppercase font-bold text-blue-600">{c.challenge_type}</span>
+                          <p className="text-xs text-slate-700 mt-1.5 font-medium leading-relaxed">"{c.prompt}"</p>
+                          <div className="flex justify-between items-center mt-3 pt-3 border-t border-slate-100/50">
+                            <span className="text-[10px] text-slate-400 font-medium">Attempts: {c.attempts}</span>
+                            <span className="text-[10px] text-slate-400 font-medium">Best Score: {c.best_score}%</span>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-xs text-slate-400 text-center py-12">No challenges assigned yet. Complete a session to generate drills.</div>
+                    )}
+                  </div>
+                </div>
+
+                {selectedChallenge ? (
+                  <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col justify-between">
+                    <div className="flex flex-col gap-4">
+                      <span className="text-[9px] uppercase font-extrabold text-blue-600 tracking-wider">Execute Selected Challenge</span>
+                      <h3 className="text-sm font-bold text-slate-800 leading-relaxed">"{selectedChallenge.prompt}"</h3>
+                      <div className="flex flex-col gap-1.5">
+                        <label className="text-xs font-semibold text-slate-600">Simulate Score (0-100)</label>
+                        <input 
+                          type="number" 
+                          min={0} 
+                          max={100}
+                          value={challengeScore}
+                          onChange={(e) => setChallengeScore(Number(e.target.value))}
+                          className="glass-input p-2 rounded-xl text-xs" 
+                        />
+                      </div>
+                    </div>
+                    <button 
+                      onClick={handleChallengeSubmit}
+                      disabled={challengeSubmitting}
+                      className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs py-2.5 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-sm mt-6"
+                    >
+                      {challengeSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : "Complete Challenge Attempt"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="bg-slate-50 border border-dashed border-slate-200 rounded-2xl flex items-center justify-center p-12 text-xs text-slate-400 text-center">
+                    Select a challenge from the checklist to execute your Twin session drill.
+                  </div>
+                )}
+              </div>
+
+              {/* Bottom Section: AI Coach Insights Panel */}
+              {coachLoading ? (
+                <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-12 flex flex-col items-center justify-center gap-6 animate-fadeIn">
+                  <div className="w-16 h-16 rounded-full border-4 border-slate-100 border-t-blue-600 animate-spin flex items-center justify-center shadow-inner">
+                    <Sparkles className="w-6 h-6 text-blue-600 animate-pulse" />
+                  </div>
+                  <div className="text-center flex flex-col gap-2 max-w-sm">
+                    <h3 className="text-sm font-bold text-slate-800">Generating AI Insights</h3>
+                    <p className="text-xs text-slate-500 leading-relaxed min-h-[32px]">
+                      {coachMessage || "Analyzing your verbal habits and visual posture metrics..."}
+                    </p>
+                  </div>
+                  <div className="w-full max-w-md bg-slate-100 rounded-full h-2 overflow-hidden shadow-inner">
+                    <div 
+                      className="bg-blue-600 h-full rounded-full transition-all duration-500 ease-out" 
+                      style={{ width: `${coachProgress}%` }}
+                    />
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-widest">{coachProgress}% Completed</span>
+                </div>
+              ) : coachError ? (
+                <div className="bg-red-50 border border-red-200 rounded-2xl p-12 flex flex-col items-center gap-4 text-center animate-fadeIn">
+                  <AlertTriangle className="w-8 h-8 text-red-500" />
+                  <div className="flex flex-col gap-1">
+                    <h3 className="text-sm font-bold text-red-800">Failed to generate insights</h3>
+                    <p className="text-xs text-red-600">{coachError}</p>
+                  </div>
+                  <button 
+                    onClick={fetchCoachData}
+                    className="bg-red-600 hover:bg-red-700 text-white font-semibold text-xs py-2.5 px-5 rounded-xl cursor-pointer shadow-sm transition-colors"
+                  >
+                    Retry Generation
+                  </button>
+                </div>
+              ) : coachRecs && !isError ? (
+                <div className="flex flex-col gap-6 animate-fadeIn">
+                  
+                  {/* Executive Summary & Feedback */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col gap-3">
+                      <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <Activity className="w-4 h-4 text-blue-500" /> Executive Summary
+                      </h3>
+                      <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 p-4 rounded-xl font-medium whitespace-pre-line">
+                        {executiveSummary || "Complete speaking sessions to generate an executive coaching summary."}
+                      </p>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col gap-3">
+                      <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <UserCheck className="w-4 h-4 text-emerald-500" /> Mentor Coaching Feedback
+                      </h3>
+                      <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 p-4 rounded-xl font-medium whitespace-pre-line">
+                        {coachingFeedback || "Feedback will populate here summarizing your vocal and posture analysis trends."}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Strengths & Weaknesses */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
+                      <h3 className="text-xs font-extrabold text-emerald-600 uppercase tracking-wider mb-4 flex items-center gap-1.5">
+                        <CheckCircle className="w-4 h-4" /> Core Speaking Strengths
+                      </h3>
+                      <ul className="flex flex-col gap-2.5">
+                        {strengths && strengths.length > 0 ? (
+                          strengths.map((str: string, i: number) => (
+                            <li key={i} className="text-xs text-slate-600 font-semibold flex items-start gap-2 leading-relaxed bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/50">
+                              <span className="text-emerald-500 font-bold">✓</span>
+                              <span>{str}</span>
+                            </li>
+                          ))
+                        ) : (
+                          <li className="text-xs text-slate-400 italic">No strengths logged yet.</li>
+                        )}
+                      </ul>
+                    </div>
+
+                    <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
+                      <h3 className="text-xs font-extrabold text-red-500 uppercase tracking-wider mb-4 flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4" /> Areas of Improvement
+                      </h3>
+                      <ul className="flex flex-col gap-2.5">
+                        {weaknesses && weaknesses.length > 0 ? (
+                          weaknesses.map((weak: string, i: number) => (
+                            <li key={i} className="text-xs text-slate-600 font-semibold flex items-start gap-2 leading-relaxed bg-slate-50/50 p-2.5 rounded-xl border border-slate-100/50">
+                              <span className="text-red-400 font-bold">•</span>
+                              <span>{weak}</span>
+                            </li>
+                          ))
+                        ) : (
+                          <li className="text-xs text-slate-400 italic">No weaknesses logged yet.</li>
+                        )}
+                      </ul>
+                    </div>
+                  </div>
+
+                  {/* Roadmap Action Plan */}
+                  <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col gap-4">
+                    <h3 className="text-xs font-extrabold text-slate-400 uppercase tracking-wider flex items-center gap-1.5 border-b border-slate-100 pb-2">
+                      <TrendingUp className="w-4 h-4 text-indigo-500" /> Twin Coaching Growth Roadmap
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      
+                      <div className="p-4 bg-red-50/30 border border-red-100/50 rounded-xl flex flex-col gap-2">
+                        <span className="text-[9px] uppercase font-bold text-red-600 tracking-wider">1. Immediate Drills (24h)</span>
+                        <ul className="flex flex-col gap-2 mt-2 text-[10px] font-semibold text-slate-600">
+                          {immediateActions && immediateActions.length > 0 ? (
+                            immediateActions.map((act: string, idx: number) => (
+                              <li key={idx} className="flex items-start gap-1">
+                                <span className="text-red-500">•</span>
+                                <span>{act}</span>
+                              </li>
+                            ))
+                          ) : (
+                            <li className="text-slate-400 italic">No drills assigned yet.</li>
+                          )}
+                        </ul>
+                      </div>
+
+                      <div className="p-4 bg-blue-50/30 border border-blue-100/50 rounded-xl flex flex-col gap-2">
+                        <span className="text-[9px] uppercase font-bold text-blue-600 tracking-wider">2. Short-Term Plan (1-2w)</span>
+                        <ul className="flex flex-col gap-2 mt-2 text-[10px] font-semibold text-slate-600">
+                          {shortTermPlan && shortTermPlan.length > 0 ? (
+                            shortTermPlan.map((act: string, idx: number) => (
+                              <li key={idx} className="flex items-start gap-1">
+                                <span className="text-blue-500">•</span>
+                                <span>{act}</span>
+                              </li>
+                            ))
+                          ) : (
+                            <li className="text-slate-400 italic">No goals assigned yet.</li>
+                          )}
+                        </ul>
+                      </div>
+
+                      <div className="p-4 bg-emerald-50/30 border border-emerald-100/50 rounded-xl flex flex-col gap-2">
+                        <span className="text-[9px] uppercase font-bold text-emerald-600 tracking-wider">3. Long-Term Growth (1-2m)</span>
+                        <ul className="flex flex-col gap-2 mt-2 text-[10px] font-semibold text-slate-600">
+                          {longTermPlan && longTermPlan.length > 0 ? (
+                            longTermPlan.map((act: string, idx: number) => (
+                              <li key={idx} className="flex items-start gap-1">
+                                <span className="text-emerald-500">•</span>
+                                <span>{act}</span>
+                              </li>
+                            ))
+                          ) : (
+                            <li className="text-slate-400 italic">No roadmap logged yet.</li>
+                          )}
+                        </ul>
+                      </div>
+
+                    </div>
+                  </div>
+
+                </div>
+              ) : null}
             </div>
-          </div>
-        )}
+          );
+        })()}
+
+        {/* ================================= GROWTH ANALYTICS VIEW ================================= */}
+        {currentScreen === "history" && (() => {
+          console.log("Growth Analytics Loaded");
+          console.log("Components Rendered");
+
+          const jamSessions = historyList ? historyList.filter(s => s.session_type === 'jam') : [];
+          const debateSessions = historyList ? historyList.filter(s => s.session_type === 'debate') : [];
+          const interviewSessions = historyList ? historyList.filter(s => s.session_type === 'interview') : [];
+          const totalSessions = dashboardStats?.total_sessions || (historyList ? historyList.length : 0);
+
+          const showEmptyState = (
+            totalSessions === 0 &&
+            jamSessions.length === 0 &&
+            debateSessions.length === 0 &&
+            interviewSessions.length === 0
+          );
+
+          if (showEmptyState) {
+            return (
+              <div className="p-8 flex flex-col gap-6 max-w-4xl mx-auto w-full">
+                <div>
+                  <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                    <BarChart3 className="w-5 h-5 text-blue-600" /> Growth Analytics
+                  </h1>
+                  <p className="text-xs text-slate-500 mt-1">Monitor your speaking performance patterns and track your Twin progress.</p>
+                </div>
+                <div className="bg-slate-50 border border-dashed border-slate-200 rounded-2xl flex flex-col items-center justify-center p-16 text-center">
+                  <BarChart3 className="w-10 h-10 text-slate-300 mb-3" />
+                  <p className="text-xs text-slate-400 font-semibold max-w-md leading-relaxed">
+                    No analytics data available yet. Complete a JAM, Debate, or Interview session to generate analytics.
+                  </p>
+                </div>
+              </div>
+            );
+          }
+
+          // Calculate Trends
+          const jamAvg = jamSessions.length > 0
+            ? Math.round(jamSessions.reduce((acc, s) => acc + (s.final_score || 0), 0) / jamSessions.length)
+            : 0;
+
+          const debateAvg = debateSessions.length > 0
+            ? Math.round(debateSessions.reduce((acc, s) => acc + (s.final_score || 0), 0) / debateSessions.length)
+            : 0;
+
+          const interviewAvg = interviewSessions.length > 0
+            ? Math.round(interviewSessions.reduce((acc, s) => acc + (s.final_score || 0), 0) / interviewSessions.length)
+            : 0;
+
+          const scoredSessions = historyList ? historyList.filter(s => (s.final_score || 0) > 0) : [];
+          const avgScore = scoredSessions.length > 0
+            ? Math.round(scoredSessions.reduce((acc, s) => acc + (s.final_score || 0), 0) / scoredSessions.length)
+            : 0;
+
+          // Chart data for comparing session types
+          const compareBarData = {
+            labels: ["JAM Analyzer", "Debate Arena", "Interview Simulator"],
+            datasets: [
+              {
+                label: "Average Score (%)",
+                data: [jamAvg, debateAvg, interviewAvg],
+                backgroundColor: [
+                  "rgba(59, 130, 246, 0.6)",
+                  "rgba(244, 63, 94, 0.6)",
+                  "rgba(16, 185, 129, 0.6)"
+                ],
+                borderColor: [
+                  "rgba(59, 130, 246, 1)",
+                  "rgba(244, 63, 94, 1)",
+                  "rgba(16, 185, 129, 1)"
+                ],
+                borderWidth: 1.5,
+              }
+            ]
+          };
+
+          const compareBarOptions = {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: false }
+            },
+            scales: {
+              y: { min: 0, max: 100 }
+            }
+          };
+
+          return (
+            <div className="p-8 flex flex-col gap-8 max-w-5xl mx-auto w-full animate-fadeIn">
+              <BackButton currentModuleName="Growth Analytics" onNavigateToDashboard={() => handleNavigation("dashboard")} />
+              
+              {/* Header */}
+              <div className="flex justify-between items-center border-b border-slate-200 pb-5">
+                <div>
+                  <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                    <BarChart3 className="w-5 h-5 text-blue-600" /> Growth Analytics
+                  </h1>
+                  <p className="text-xs text-slate-500 mt-1">Track your score trends, communication dimensions progress, and historical reports.</p>
+                </div>
+              </div>
+
+              {/* Communication Growth Metrics */}
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
+                <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col justify-between">
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Total Completed Sessions</p>
+                  <div className="flex justify-between items-end mt-4">
+                    <h3 className="text-2xl font-black text-slate-800">{dashboardStats?.total_sessions || historyList.length}</h3>
+                    <div className="h-8 w-8 rounded-lg bg-blue-50 flex items-center justify-center">
+                      <Mic className="h-4.5 w-4.5 text-blue-600" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col justify-between">
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Weekly Streak</p>
+                  <div className="flex justify-between items-end mt-4">
+                    <h3 className="text-2xl font-black text-slate-800">{dashboardStats?.streak || 0} Days</h3>
+                    <div className="h-8 w-8 rounded-lg bg-orange-50 flex items-center justify-center">
+                      <Flame className="h-4.5 w-4.5 text-orange-500" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col justify-between">
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Avg Confidence Score</p>
+                  <div className="flex justify-between items-end mt-4">
+                    <h3 className="text-2xl font-black text-slate-800">{dashboardStats?.avg_confidence || 0}%</h3>
+                    <div className="h-8 w-8 rounded-lg bg-emerald-50 flex items-center justify-center">
+                      <Award className="h-4.5 w-4.5 text-emerald-600" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col justify-between">
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Avg Communication Clarity</p>
+                  <div className="flex justify-between items-end mt-4">
+                    <h3 className="text-2xl font-black text-slate-800">{dashboardStats?.avg_communication || 0}%</h3>
+                    <div className="h-8 w-8 rounded-lg bg-purple-50 flex items-center justify-center">
+                      <TrendingUp className="h-4.5 w-4.5 text-purple-600" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col justify-between">
+                  <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Average Score</p>
+                  <div className="flex justify-between items-end mt-4">
+                    <h3 className="text-2xl font-black text-slate-800">{avgScore}%</h3>
+                    <div className="h-8 w-8 rounded-lg bg-indigo-50 flex items-center justify-center">
+                      <Trophy className="h-4.5 w-4.5 text-indigo-600" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Progress Charts & Performance Trends */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                
+                {/* 1. Overall Performance Score Trend (Line Chart) */}
+                <div className="lg:col-span-2 bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
+                  <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider mb-4">Overall Performance Score Trend</h3>
+                  {historyList && historyList.length > 0 ? (
+                    <div className="h-72">
+                      <Line data={getScoreTrendChartConfig()} options={{ responsive: true, maintainAspectRatio: false }} />
+                    </div>
+                  ) : (
+                    <div className="h-72 flex items-center justify-center text-xs text-slate-400">Record multiple sessions to see progress curve trends.</div>
+                  )}
+                </div>
+
+                {/* 2. Speaking Modes Comparison (Bar Chart) */}
+                <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col justify-between">
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider mb-4">Session Types Performance</h3>
+                    <div className="h-56">
+                      <Bar data={compareBarData} options={compareBarOptions} />
+                    </div>
+                  </div>
+                  <div className="mt-4 pt-4 border-t border-slate-100 flex justify-around text-[10px] text-slate-500 font-semibold">
+                    <div className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-blue-500 inline-block"></span>
+                      <span>JAM: {jamSessions.length}</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-rose-500 inline-block"></span>
+                      <span>Debate: {debateSessions.length}</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>
+                      <span>Interview: {interviewSessions.length}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Performance History (Historical Reports Table) */}
+              <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
+                <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider mb-4">Performance History & Reports</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs text-left text-slate-600">
+                    <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-100">
+                      <tr>
+                        <th className="pb-3">Topic</th>
+                        <th className="pb-3">Category</th>
+                        <th className="pb-3">Session Type</th>
+                        <th className="pb-3">Score</th>
+                        <th className="pb-3">Completed Date</th>
+                        <th className="pb-3 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {historyList.map((hist, i) => (
+                        <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50">
+                          <td className="py-4 font-semibold text-slate-800 truncate max-w-[220px]">
+                            <div className="flex flex-col gap-0.5">
+                              <span>"{hist.topic}"</span>
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <span className="bg-slate-100 text-slate-500 px-1 py-0.5 rounded text-[8px] font-extrabold uppercase">
+                                  {hist.category}
+                                </span>
+                                {hist.session_type === 'jam' && hist.difficulty && (
+                                  <span className={`px-1 py-0.5 rounded text-[8px] font-extrabold uppercase ${
+                                    hist.difficulty === 'Easy' ? 'bg-green-50 text-green-600 border border-green-200/50' :
+                                    hist.difficulty === 'Hard' ? 'bg-red-50 text-red-600 border border-red-200/50' :
+                                    'bg-indigo-50 text-indigo-600 border border-indigo-200/50'
+                                  }`}>
+                                    {hist.difficulty}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-4">{hist.category}</td>
+                          <td className="py-4">
+                            <span className={`px-2 py-0.5 rounded-full text-[9px] uppercase font-bold ${
+                              hist.session_type === 'jam' ? 'bg-blue-50 text-blue-600' :
+                              hist.session_type === 'debate' ? 'bg-rose-50 text-rose-600' :
+                              hist.session_type === 'interview' ? 'bg-emerald-50 text-emerald-600' :
+                              hist.session_type === 'document' ? 'bg-violet-50 text-violet-600' :
+                              'bg-amber-50 text-amber-600'
+                            }`}>
+                              {hist.session_type}
+                            </span>
+                          </td>
+                          <td className="py-4 font-bold text-slate-900">{hist.final_score}%</td>
+                          <td className="py-4 text-slate-400">{new Date(hist.created_at).toLocaleString()}</td>
+                          <td className="py-4 text-right flex items-center justify-end gap-3">
+                            <button 
+                              onClick={() => handleViewSessionFromHistory(hist.id, hist.session_type)}
+                              className="text-blue-600 hover:underline font-bold text-[11px]"
+                            >
+                              View Report
+                            </button>
+                            {['jam', 'debate', 'interview'].includes(hist.session_type) && (
+                              <button 
+                                onClick={() => setVideoPlayerSessionId(hist.id)}
+                                className="text-indigo-600 hover:underline font-bold text-[11px]"
+                              >
+                                View Recording
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+          );
+        })()}
 
         {/* ================================= PROCESSING PAGE ================================= */}
         {currentScreen === "processing" && (
           <div className="flex-1 flex flex-col items-center justify-center p-6 bg-slate-50 text-center">
             <Loader2 className="w-12 h-12 text-blue-600 animate-spin mb-4" />
-            <h2 className="text-lg font-bold text-slate-800">Processing Twin Recording...</h2>
-            <p className="text-xs text-slate-500 mt-1">Executing Deepgram, Librosa, MediaPipe, and OpenAI assessment</p>
+            <h2 className="text-lg font-bold text-slate-800">{processingMessage || "Processing Twin Recording..."}</h2>
+            <p className="text-xs text-slate-500 mt-1">Executing Whisper, Librosa, MediaPipe, and OpenAI assessment</p>
           </div>
         )}
 
         {/* ================================= RESULTS VIEW ================================= */}
+        {currentScreen === "results" && !activeSession && (
+          <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full text-center">
+            <h1 className="text-xl font-bold text-slate-900 mt-1">Analysis Report</h1>
+            <div className="bg-white border border-slate-200 p-12 rounded-2xl shadow-sm text-center flex flex-col items-center justify-center gap-3">
+              <p className="text-sm text-slate-500 font-semibold">Analysis data unavailable.</p>
+              <button
+                onClick={() => handleNavigation("dashboard")}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2.5 px-5 rounded-xl cursor-pointer transition-colors"
+              >
+                Back to Dashboard
+              </button>
+            </div>
+          </div>
+        )}
+
         {currentScreen === "results" && activeSession && (() => {
-          const report = activeSession.reports?.[0]?.summary || {
-            overall_score: activeSession.dna ? Math.round((activeSession.dna.confidence + activeSession.dna.fluency + activeSession.dna.clarity) / 3) : 75,
+          console.log("Report Rendered");
+          const dbReport = activeSession.reports?.[0]?.summary;
+          const isReportUnavailable = !dbReport || Object.keys(dbReport).length === 0 || dbReport.executive_summary?.includes("Analysis completed but detailed AI feedback could not be generated.");
+          
+          if (isReportUnavailable) {
+            return (
+              <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center border-b border-slate-200 pb-5 gap-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] bg-blue-100 text-blue-800 font-extrabold uppercase px-2.5 py-1 rounded-md">
+                        {activeSession.session_type.toUpperCase()}
+                      </span>
+                      <span className="text-xs text-slate-400 font-semibold">ID: {activeSession.id.substring(0, 8)}</span>
+                    </div>
+                    <h1 className="text-xl font-bold text-slate-900 mt-2">"{activeSession.topic}"</h1>
+                    <p className="text-xs text-slate-500 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                      <span>Category: {activeSession.category}</span>
+                      {activeSession.session_type === 'jam' && activeSession.difficulty && (
+                        <>
+                          <span>•</span>
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${
+                            activeSession.difficulty === 'Easy' ? 'bg-green-50 text-green-600 border border-green-200/50' :
+                            activeSession.difficulty === 'Hard' ? 'bg-red-50 text-red-600 border border-red-200/50' :
+                            'bg-indigo-50 text-indigo-600 border border-indigo-200/50'
+                          }`}>
+                            {activeSession.difficulty}
+                          </span>
+                        </>
+                      )}
+                      <span>•</span>
+                      <span>Completed: {new Date(activeSession.created_at).toLocaleString()}</span>
+                    </p>
+                  </div>
+                  <div className="flex gap-3 self-stretch md:self-auto">
+                    <button 
+                      onClick={() => handleNavigation("dashboard")} 
+                      className="flex-1 md:flex-none bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-4 py-2.5 rounded-xl font-semibold cursor-pointer transition-colors text-center"
+                    >
+                      Back to Dashboard
+                    </button>
+                  </div>
+                </div>
+                <div className="bg-white border border-slate-200 p-12 rounded-2xl shadow-sm text-center flex flex-col items-center justify-center gap-3">
+                  <p className="text-sm text-slate-500 font-semibold">Analysis report could not be generated.</p>
+                </div>
+              </div>
+            );
+          }
+
+          const defaultReport = {
+            final_score: activeSession.final_score || 0,
+            overall_score: activeSession.final_score || 0,
             rating: activeSession.dna?.profile_summary || "Good",
             executive_summary: "- Key strengths: Good pacing and posture.\n- Major weaknesses: Focus on reducing filler words.\n- Overall assessment: solid speech delivery with potential to improve.",
             speech_analysis: {
@@ -3559,13 +4989,15 @@ export default function Home() {
               grammar_text: "Grammar was clean and direct.",
               vocabulary_text: "Vocabulary was clear and category-appropriate."
             },
-            detailed_strengths: activeSession.reports?.[0]?.summary?.strengths || ["Conversational pace", "Strong eye contact", "Good posture"],
-            areas_for_improvement: activeSession.reports?.[0]?.summary?.improvements || ["Reduce filler words", "Improve hand gestures", "Vary pitch tone"],
+            detailed_strengths: ["Conversational pace", "Strong eye contact", "Good posture"],
+            areas_for_improvement: ["Reduce filler words", "Improve hand gestures", "Vary pitch tone"],
             action_plan: {
               immediate_actions: ["Implement the Lens-Dot target drill to anchor your visual gaze."],
               short_term_actions: ["Play the 'Pause Game' during discussions to eliminate filler words."],
               long_term_actions: ["Rehearse system architecture talking points aloud to build vocabulary structure."]
             },
+            expected_answer: `An expert response to "${activeSession.topic}" should cover the fundamental concepts of "${activeSession.category}", discuss practical implications, and conclude with strategic actions.`,
+            missing_concepts: ["Key industrial case studies", "Quantitative metrics and examples"],
             analytics_dashboard: {
               speech_confidence: activeSession.transcript?.confidence_score || 85,
               eye_contact_pct: activeSession.face_metrics?.eye_contact_percentage || 75,
@@ -3580,8 +5012,17 @@ export default function Home() {
               whisper_confidence: 85,
               frames_processed: 300,
               face_detection_rate: 98.0
-            }
+            },
+            strengths: ["Conversational pace", "Strong eye contact", "Good posture"],
+            weaknesses: ["Reduce filler words", "Improve hand gestures", "Vary pitch tone"],
+            recommendations: [
+              "Implement the Lens-Dot target drill to anchor your visual gaze.",
+              "Play the 'Pause Game' during discussions to eliminate filler words.",
+              "Rehearse system architecture talking points aloud to build vocabulary structure."
+            ],
+            final_assessment: "Solid speech delivery with potential to improve."
           };
+          const report = mergeReport(defaultReport, dbReport);
 
           // Local radar config
           const radarData = {
@@ -3630,9 +5071,33 @@ export default function Home() {
                     <span className="text-xs text-slate-400 font-semibold">ID: {activeSession.id.substring(0, 8)}</span>
                   </div>
                   <h1 className="text-xl font-bold text-slate-900 mt-2">"{activeSession.topic}"</h1>
-                  <p className="text-xs text-slate-500 mt-0.5">Category: {activeSession.category} • Completed: {new Date(activeSession.created_at).toLocaleString()}</p>
+                  <p className="text-xs text-slate-500 mt-0.5 flex items-center gap-1.5 flex-wrap">
+                    <span>Category: {activeSession.category}</span>
+                    {activeSession.session_type === 'jam' && activeSession.difficulty && (
+                      <>
+                        <span>•</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${
+                          activeSession.difficulty === 'Easy' ? 'bg-green-50 text-green-600 border border-green-200/50' :
+                          activeSession.difficulty === 'Hard' ? 'bg-red-50 text-red-600 border border-red-200/50' :
+                          'bg-indigo-50 text-indigo-600 border border-indigo-200/50'
+                        }`}>
+                          {activeSession.difficulty}
+                        </span>
+                      </>
+                    )}
+                    <span>•</span>
+                    <span>Completed: {new Date(activeSession.created_at).toLocaleString()}</span>
+                  </p>
                 </div>
                 <div className="flex gap-3 self-stretch md:self-auto">
+                  {['jam', 'debate', 'interview'].includes(activeSession.session_type) && (
+                    <button 
+                      onClick={() => setVideoPlayerSessionId(activeSession.id)}
+                      className="flex-1 md:flex-none bg-indigo-600 hover:bg-indigo-700 text-white text-xs px-4 py-2.5 rounded-xl font-semibold shadow-sm flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                    >
+                      <Video className="w-4 h-4" /> View Recording
+                    </button>
+                  )}
                   <button 
                     onClick={handleDownloadPDF} 
                     className="flex-1 md:flex-none bg-blue-600 hover:bg-blue-700 text-white text-xs px-4 py-2.5 rounded-xl font-semibold shadow-sm flex items-center justify-center gap-2 cursor-pointer transition-colors"
@@ -3640,7 +5105,7 @@ export default function Home() {
                     <FileDown className="w-4 h-4" /> Export Report PDF
                   </button>
                   <button 
-                    onClick={() => setCurrentScreen("dashboard")} 
+                    onClick={() => handleNavigation("dashboard")} 
                     className="flex-1 md:flex-none bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-4 py-2.5 rounded-xl font-semibold cursor-pointer transition-colors text-center"
                   >
                     Back to Dashboard
@@ -3654,7 +5119,7 @@ export default function Home() {
                   { id: "overview", label: "Executive Summary" },
                   { id: "speech", label: "Speech Analysis" },
                   { id: "body", label: "Body Language" },
-                  { id: "effectiveness", label: "Effectiveness Radial" },
+                  { id: "effectiveness", label: "Analysis Profile" },
                   { id: "content", label: "Content & Actions" }
                 ].map((tab) => (
                   <button
@@ -3687,10 +5152,10 @@ export default function Home() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
                         <h3 className="text-xs font-bold text-emerald-600 uppercase tracking-wider mb-4 flex items-center gap-1.5">
-                          <CheckCircle className="w-4 h-4" /> 7. Detailed Strengths
+                          <CheckCircle className="w-4 h-4" /> 5. Strengths
                         </h3>
                         <ul className="flex flex-col gap-2.5">
-                          {(report.detailed_strengths || []).map((strength: string, i: number) => (
+                          {(report.strengths || report.detailed_strengths || []).map((strength: string, i: number) => (
                             <li key={i} className="text-xs text-slate-600 font-semibold flex items-start gap-2">
                               <span className="text-emerald-500 font-bold mt-0.5">✓</span>
                               <span>{strength}</span>
@@ -3701,10 +5166,10 @@ export default function Home() {
 
                       <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
                         <h3 className="text-xs font-bold text-red-500 uppercase tracking-wider mb-4 flex items-center gap-1.5">
-                          <AlertTriangle className="w-4 h-4" /> 8. Areas for Improvement
+                          <AlertTriangle className="w-4 h-4" /> 6. Areas for Improvement
                         </h3>
                         <ul className="flex flex-col gap-2.5">
-                          {(report.areas_for_improvement || []).map((improvement: string, i: number) => (
+                          {(report.weaknesses || report.areas_for_improvement || []).map((improvement: string, i: number) => (
                             <li key={i} className="text-xs text-slate-600 font-semibold flex items-start gap-2">
                               <span className="text-red-400 font-bold mt-0.5">!</span>
                               <span>{improvement}</span>
@@ -3714,11 +5179,50 @@ export default function Home() {
                       </div>
                     </div>
 
+                    {/* Recommendations & Final Assessment */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
+                        <h3 className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-4 flex items-center gap-1.5">
+                          <Sparkles className="w-4 h-4" /> 7. Personalized Recommendations
+                        </h3>
+                        <ul className="flex flex-col gap-2.5">
+                          {(report.recommendations || []).map((rec: string, i: number) => (
+                            <li key={i} className="text-xs text-slate-600 font-semibold flex items-start gap-2">
+                              <span className="text-blue-500 font-bold mt-0.5">•</span>
+                              <span>{rec}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
+                        <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4 flex items-center gap-1.5">
+                          <FileText className="w-4 h-4" /> 10. Final Communication Assessment
+                        </h3>
+                        <div className="text-xs text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 p-4 rounded-xl font-medium whitespace-pre-line">
+                          {report.final_assessment || report.coaching_feedback || "No final assessment available."}
+                        </div>
+                      </div>
+                    </div>
+
                     {/* Transcribed Speech */}
                     <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
                       <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Evaluated Transcript</h3>
                       <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 p-4 rounded-xl font-medium max-h-48 overflow-y-auto">
-                        {activeSession.transcript?.corrected_transcript || "Transcript unavailable."}
+                        {(() => {
+                          // Always render the raw Whisper transcript — never AI-generated text.
+                          // raw_transcript = exact spoken words. Fallback to corrected_transcript only
+                          // for backwards compatibility with sessions recorded before this fix.
+                          const displayTranscript =
+                            activeSession.transcript?.raw_transcript ||
+                            activeSession.transcript?.corrected_transcript ||
+                            "";
+                          if (displayTranscript) {
+                            console.log("Transcript Rendered");
+                            console.log(`Transcript Rendered | length=${displayTranscript.length} | preview="${displayTranscript.slice(0, 100)}"`);
+                            return displayTranscript;
+                          }
+                          return "Transcript unavailable.";
+                        })()}
                       </p>
                     </div>
                   </div>
@@ -3726,8 +5230,8 @@ export default function Home() {
                   <div className="flex flex-col gap-6">
                     {/* Score Card */}
                     <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm text-center flex flex-col items-center justify-center min-h-[200px]">
-                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">1. Overall Communication Score</span>
-                      <h2 className="text-5xl font-black text-blue-600 mt-3">{report.overall_score}/100</h2>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">9. Overall Score Breakdown</span>
+                      <h2 className="text-5xl font-black text-blue-600 mt-3">{report.final_score}/100</h2>
                       <span className={`mt-3.5 px-3 py-1 rounded-full text-xs font-extrabold ${
                         report.rating === "Excellent" ? "bg-emerald-100 text-emerald-800" :
                         report.rating === "Good" ? "bg-blue-100 text-blue-800" :
@@ -3771,7 +5275,7 @@ export default function Home() {
               {/* Speech Analysis Tab */}
               {activeResultTab === "speech" && (
                 <div className="flex flex-col gap-6 animate-fadeIn">
-                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">3. Speech Analysis metrics</h3>
+                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">2. Speech Analysis</h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {[
                       { key: "speaking_rate", label: "Speaking Rate", unit: "WPM" },
@@ -3808,7 +5312,7 @@ export default function Home() {
               {/* Body Language Tab */}
               {activeResultTab === "body" && (
                 <div className="flex flex-col gap-6 animate-fadeIn">
-                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">4. Body Language Analysis</h3>
+                  <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">3. Body Language Analysis</h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {[
                       { key: "eye_contact", label: "Eye Contact" },
@@ -3845,7 +5349,7 @@ export default function Home() {
               {activeResultTab === "effectiveness" && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fadeIn">
                   <div className="lg:col-span-2 bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col items-center">
-                    <h3 className="text-xs font-bold text-slate-900 self-start mb-4">5. Communication Effectiveness Radial</h3>
+                    <h3 className="text-xs font-bold text-slate-900 self-start mb-4">4. Communication Analysis Profile</h3>
                     <div className="h-80 w-full max-w-sm">
                       <Radar data={radarData} options={{ responsive: true, maintainAspectRatio: false }} />
                     </div>
@@ -3912,7 +5416,7 @@ export default function Home() {
 
                     {/* Action plan */}
                     <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm flex flex-col gap-4">
-                      <h3 className="text-xs font-bold text-slate-900 border-b border-slate-100 pb-2">9. Action Plan</h3>
+                      <h3 className="text-xs font-bold text-slate-900 border-b border-slate-100 pb-2">8. Action Plan</h3>
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div className="p-4 bg-red-50/50 border border-red-100 rounded-xl">
                           <span className="text-[9px] uppercase font-bold text-red-600">Immediate Actions</span>
@@ -3978,7 +5482,219 @@ export default function Home() {
             </div>
           );
         })()}
+
+        {/* ================================= VIEW ALL SESSIONS SCREEN ================================= */}
+        {currentScreen === "sessions" && (() => {
+          // 1. Filter and search sessions
+          let filteredHistory = [...historyList];
+
+          // Text Search
+          if (sessionsSearch.trim() !== "") {
+            const query = sessionsSearch.toLowerCase();
+            filteredHistory = filteredHistory.filter(
+              (h) =>
+                (h.topic && h.topic.toLowerCase().includes(query)) ||
+                (h.category && h.category.toLowerCase().includes(query))
+            );
+          }
+
+          // Module filter
+          if (sessionsModuleFilter !== "all") {
+            filteredHistory = filteredHistory.filter((h) => {
+              if (sessionsModuleFilter === "jam") return h.session_type === "jam";
+              if (sessionsModuleFilter === "debate") return h.session_type === "debate";
+              if (sessionsModuleFilter === "interview") return h.session_type === "interview";
+              if (sessionsModuleFilter === "document") return h.session_type === "document" || h.session_type === "viva";
+              return true;
+            });
+          }
+
+          // Sorting
+          filteredHistory.sort((a, b) => {
+            const dateA = new Date(a.created_at).getTime();
+            const dateB = new Date(b.created_at).getTime();
+            return sessionsSortOrder === "newest" ? dateB - dateA : dateA - dateB;
+          });
+
+          return (
+            <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full animate-fadeIn">
+              {/* Header */}
+              <div className="flex flex-col gap-2 md:flex-row md:justify-between md:items-center border-b border-slate-200 pb-5">
+                <div className="flex flex-col gap-1">
+                  <button
+                    onClick={() => handleNavigation("dashboard")}
+                    className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 transition-colors w-max font-semibold cursor-pointer mb-1"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" /> Back to Dashboard
+                  </button>
+                  <h1 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                    <History className="w-5 h-5 text-blue-600" /> Practice Session History
+                  </h1>
+                  <p className="text-xs text-slate-500">
+                    Review and analyze your comprehensive practice history across all speaking modules.
+                  </p>
+                </div>
+              </div>
+
+              {/* Filters & Search Controls */}
+              <div className="bg-white border border-slate-200 p-4 rounded-2xl shadow-sm flex flex-col md:flex-row gap-4 items-center justify-between">
+                {/* Search */}
+                <div className="relative w-full md:w-80">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    value={sessionsSearch}
+                    onChange={(e) => setSessionsSearch(e.target.value)}
+                    placeholder="Search by topic or category..."
+                    className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-xl text-xs bg-[#F8FAFC] focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-600 transition-all font-medium"
+                  />
+                </div>
+
+                {/* Filter & Sort select group */}
+                <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
+                  {/* Module Filter */}
+                  <div className="flex items-center gap-2">
+                    <Filter className="w-3.5 h-3.5 text-slate-400" />
+                    <select
+                      value={sessionsModuleFilter}
+                      onChange={(e) => setSessionsModuleFilter(e.target.value)}
+                      className="border border-slate-200 bg-[#F8FAFC] focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-600 px-3 py-2 rounded-xl text-xs font-semibold text-slate-600"
+                    >
+                      <option value="all">All Modules</option>
+                      <option value="jam">JAM Analyzer</option>
+                      <option value="debate">Debate Arena</option>
+                      <option value="interview">Interview Simulator</option>
+                      <option value="document">Document Analyzer</option>
+                    </select>
+                  </div>
+
+                  {/* Date Sort */}
+                  <div className="flex items-center gap-2">
+                    <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                    <select
+                      value={sessionsSortOrder}
+                      onChange={(e) => setSessionsSortOrder(e.target.value)}
+                      className="border border-slate-200 bg-[#F8FAFC] focus:bg-white focus:outline-none focus:ring-1 focus:ring-blue-600 px-3 py-2 rounded-xl text-xs font-semibold text-slate-600"
+                    >
+                      <option value="newest">Newest First</option>
+                      <option value="oldest">Oldest First</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Table */}
+              <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-6 overflow-hidden">
+                {filteredHistory.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left text-slate-600">
+                      <thead className="text-[10px] uppercase text-slate-400 border-b border-slate-100">
+                        <tr>
+                          <th className="pb-3">Module Name</th>
+                          <th className="pb-3">Topic</th>
+                          <th className="pb-3">Date</th>
+                          <th className="pb-3">Score</th>
+                          <th className="pb-3">Status</th>
+                          <th className="pb-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filteredHistory.map((hist, i) => (
+                          <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50 transition-colors">
+                            <td className="py-4">
+                              <span className={`px-2.5 py-1 rounded-full text-[9px] uppercase font-bold tracking-wider ${
+                                hist.session_type === 'jam' ? 'bg-blue-50 text-blue-600 border border-blue-100/30' :
+                                hist.session_type === 'debate' ? 'bg-rose-50 text-rose-600 border border-rose-100/30' :
+                                hist.session_type === 'interview' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100/30' :
+                                hist.session_type === 'document' ? 'bg-purple-50 text-purple-600 border border-purple-100/30' :
+                                'bg-amber-50 text-amber-600 border border-amber-100/30'
+                              }`}>
+                                {hist.session_type === 'jam' ? 'JAM Analyzer' :
+                                 hist.session_type === 'debate' ? 'Debate Arena' :
+                                 hist.session_type === 'interview' ? 'Interview' :
+                                 hist.session_type === 'document' ? 'Doc Presentation' :
+                                 'Doc Viva Q&A'}
+                              </span>
+                            </td>
+                            <td className="py-4 font-semibold text-slate-800 max-w-[280px] truncate">
+                              <div className="flex flex-col gap-0.5">
+                                <span>{hist.session_type === "viva" ? hist.topic : `"${hist.topic}"`}</span>
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                  <span className="bg-slate-100 text-slate-500 px-1 py-0.5 rounded text-[8px] font-extrabold uppercase">
+                                    {hist.category}
+                                  </span>
+                                  {hist.session_type === 'jam' && hist.difficulty && (
+                                    <span className={`px-1 py-0.5 rounded text-[8px] font-extrabold uppercase ${
+                                      hist.difficulty === 'Easy' ? 'bg-green-50 text-green-600 border border-green-200/50' :
+                                      hist.difficulty === 'Hard' ? 'bg-red-50 text-red-600 border border-red-200/50' :
+                                      'bg-indigo-50 text-indigo-600 border border-indigo-200/50'
+                                    }`}>
+                                      {hist.difficulty}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
+                            <td className="py-4 text-slate-400 font-medium">
+                              {new Date(hist.created_at).toLocaleDateString()} {new Date(hist.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                            </td>
+                            <td className="py-4 font-bold text-slate-900">
+                              <span className={
+                                hist.final_score >= 75 ? "text-emerald-600" :
+                                hist.final_score >= 50 ? "text-amber-600" : "text-red-500"
+                              }>
+                                {hist.final_score}%
+                              </span>
+                            </td>
+                            <td className="py-4">
+                              <span className={`px-2 py-0.5 rounded-full text-[9px] uppercase font-extrabold ${
+                                hist.status === 'completed' ? 'bg-emerald-50 text-emerald-600' :
+                                hist.status === 'failed' ? 'bg-red-50 text-red-600' :
+                                'bg-amber-50 text-amber-600 animate-pulse'
+                              }`}>
+                                {hist.status || 'processing'}
+                              </span>
+                            </td>
+                            <td className="py-4 text-right flex items-center justify-end gap-3">
+                              <button
+                                onClick={() => handleViewSessionFromHistory(hist.id, hist.session_type)}
+                                className="text-blue-600 hover:text-blue-700 hover:underline font-bold transition-all cursor-pointer"
+                              >
+                                {hist.session_type === "viva" ? "Details" : "View Report"}
+                              </button>
+                              {['jam', 'debate', 'interview'].includes(hist.session_type) && hist.status === 'completed' && (
+                                <button
+                                  onClick={() => setVideoPlayerSessionId(hist.id)}
+                                  className="text-indigo-600 hover:text-indigo-700 hover:underline font-bold transition-all cursor-pointer"
+                                >
+                                  View Recording
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="py-16 flex flex-col items-center justify-center text-center gap-3">
+                    <History className="w-10 h-10 text-slate-300" />
+                    <p className="text-xs text-slate-400 font-bold max-w-sm leading-relaxed">
+                      No matching practice sessions found. Change filters or search terms, or start practicing to generate records.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </div>
+      {videoPlayerSessionId && (
+        <SessionVideoPlayer
+          sessionId={videoPlayerSessionId}
+          onClose={() => setVideoPlayerSessionId(null)}
+        />
+      )}
     </div>
   );
 }

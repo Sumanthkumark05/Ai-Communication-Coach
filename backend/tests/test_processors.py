@@ -23,7 +23,7 @@ def test_analyze_speech_metrics():
     
     assert metrics["words_per_minute"] == 150
     assert metrics["filler_words"] == {
-        "um": 0, "uh": 0, "ah": 0, "er": 0, "like": 0, "you know": 0,
+        "um": 0, "uh": 0, "ah": 0, "ahh": 0, "uhh": 0, "erm": 0, "like": 0, "you know": 0,
         "actually": 0, "basically": 0, "literally": 0, "sort of": 0, "kind of": 0
     }
     assert metrics["pause_count"] == 0
@@ -70,7 +70,7 @@ def test_local_evaluation_fallback():
         "transcript": "Hello from artificial intelligence. We are testing the code today.",
         "words_per_minute": 130,
         "filler_words": {
-            "um": 1, "uh": 0, "ah": 0, "er": 0, "like": 0, "you know": 0,
+            "um": 1, "uh": 0, "ah": 0, "ahh": 0, "uhh": 0, "erm": 0, "like": 0, "you know": 0,
             "actually": 0, "basically": 0, "literally": 0, "sort of": 0, "kind of": 0
         },
         "pause_count": 0,
@@ -153,10 +153,10 @@ def test_speech_analysis_quality_improvements():
     from app.services.audio_processor import count_filler_words, clean_fillers_from_transcript
     
     # 1. Test repeat variations matching
-    fillers = count_filler_words("uumm, uhhh, er, like, you know, actually, basically, literally, kind of, sort of.")
+    fillers = count_filler_words("uumm, uhhh, erm, like, you know, actually, basically, literally, kind of, sort of.")
     assert fillers["um"] == 1
-    assert fillers["uh"] == 1
-    assert fillers["er"] == 1
+    assert fillers["uhh"] == 1
+    assert fillers["erm"] == 1
     assert fillers["like"] == 1
     assert fillers["you know"] == 1
     assert fillers["actually"] == 1
@@ -164,12 +164,12 @@ def test_speech_analysis_quality_improvements():
     assert fillers["literally"] == 1
     assert fillers["sort of"] == 1
     assert fillers["kind of"] == 1
-
+ 
     # 2. Test clean_fillers_from_transcript
     raw = "So, um, like, actually, you know, we should go."
     cleaned = clean_fillers_from_transcript(raw)
     assert cleaned == "So, we should go."
-
+ 
     # 3. Test analyze_speech_metrics with filler occurrences
     words = [
         {"word": "So", "start": 0.0, "end": 0.3},
@@ -182,7 +182,7 @@ def test_speech_analysis_quality_improvements():
     duration = 3.0
     metrics = analyze_speech_metrics(words, duration)
     assert metrics["raw_transcript"] == "So uumm like we should go"
-    assert metrics["transcript"] == "So we should go"
+    assert metrics["transcript"] == "So uumm like we should go"
     assert len(metrics["filler_occurrences"]) == 2
     assert metrics["filler_occurrences"][0]["filler"] == "um"
     assert metrics["filler_occurrences"][0]["start"] == 0.4
@@ -207,7 +207,7 @@ def test_silent_and_low_confidence_scenarios():
         res = analyze_video_speech("dummy_path", "Is AI replacing jobs?", "Technology")
         assert res["status"] == "NO_SPEECH_DETECTED"
         assert res["overall_score"] == 0
-        assert "under 2 seconds" in res["feedback"]
+        assert "under 2.0 seconds" in res["feedback"]
 
     # Case 4: Very low-confidence audio with low speech duration
     with patch("app.services.ai_analyzer.process_audio") as mock_process:

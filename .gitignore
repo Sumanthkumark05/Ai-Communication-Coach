@@ -18,6 +18,10 @@ backend/uploads/
 # Environment
 .env
 .env.local
+.env.*
+!.env.example
+*.pem
+*.key
 
 # Node
 node_modules/

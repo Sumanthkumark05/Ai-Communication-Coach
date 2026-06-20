@@ -3,35 +3,42 @@ import logging
 from typing import List, Dict, Any, Optional
 from pinecone import Pinecone
 from openai import OpenAI
+from app.config import settings
 
 logger = logging.getLogger("jam_analyzer")
 
 class MemoryService:
     def __init__(self):
-        self.pinecone_key = os.getenv("PINECONE_API_KEY")
-        self.index_name = os.getenv("PINECONE_INDEX_NAME", "communication-twin")
-        self.openai_key = os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
+        logger.info("[MemoryService] Initializing Memory Service...")
+        self.pinecone_key = settings.PINECONE_API_KEY or os.getenv("PINECONE_API_KEY")
+        self.index_name = settings.PINECONE_INDEX_NAME or os.getenv("PINECONE_INDEX_NAME", "communication-twin")
+        self.openai_key = settings.OPENAI_KEY or settings.OPENAI_API_KEY or os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
         
         # Initialize Pinecone Client
         if self.pinecone_key:
             try:
+                logger.info(f"[MemoryService] Pinecone API key configured (length: {len(self.pinecone_key)}). Connecting to Pinecone...")
                 self.pc = Pinecone(api_key=self.pinecone_key)
-                # Ensure index is instantiated (assumes index exists or handles connection gracefully)
                 self.index = self.pc.Index(self.index_name)
-                logger.info(f"Successfully connected to Pinecone index: '{self.index_name}'")
+                logger.info(f"[MemoryService] Successfully connected to Pinecone index: '{self.index_name}'")
             except Exception as e:
                 self.index = None
-                logger.error(f"Failed to initialize Pinecone Index connection: {e}")
+                logger.error(f"[MemoryService] Failed to initialize Pinecone Index connection: {e}")
         else:
             self.index = None
-            logger.warning("PINECONE_API_KEY environment variable is not configured. Pinecone service functions will bypass.")
+            logger.warning("[MemoryService] PINECONE_API_KEY is not configured. Pinecone service functions will bypass.")
             
         # Initialize OpenAI Client (for vector embeddings)
         if self.openai_key:
-            self.openai_client = OpenAI(api_key=self.openai_key)
+            try:
+                logger.info(f"[MemoryService] OpenAI API key configured for embeddings (length: {len(self.openai_key)}).")
+                self.openai_client = OpenAI(api_key=self.openai_key)
+            except Exception as e:
+                logger.error(f"[MemoryService] Failed to construct OpenAI client for embeddings: {e}")
+                self.openai_client = None
         else:
             self.openai_client = None
-            logger.warning("OPENAI_KEY/OPENAI_API_KEY is not configured. Embedding vector generation will fail.")
+            logger.warning("[MemoryService] OPENAI_KEY/OPENAI_API_KEY is not configured for embeddings. Embedding vector generation will fail.")
 
     def _get_embedding(self, text: str) -> List[float]:
         """

@@ -34,10 +34,14 @@ class Session(Base):
     session_type = Column(String(50), nullable=False) # 'jam', 'debate', 'interview'
     topic = Column(String(255), nullable=False)
     category = Column(String(100), nullable=False)
+    difficulty = Column(String(50), nullable=True, default="Medium")
     video_url = Column(String(500), nullable=True)
+    analysis_status = Column(String(20), nullable=False, default="pending")  # pending | processing | completed | failed
     instant_start = Column(Boolean, nullable=True, default=False)
     preparation_mode = Column(Boolean, nullable=True, default=False)
     skip_preparation = Column(Boolean, nullable=True, default=False)
+    final_score = Column(Integer, nullable=False, default=0)
+    session_metadata = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="sessions")
@@ -48,6 +52,7 @@ class Session(Base):
     debate_session = relationship("DebateSession", back_populates="session", uselist=False, cascade="all, delete-orphan")
     interview_session = relationship("InterviewSession", back_populates="session", uselist=False, cascade="all, delete-orphan")
     reports = relationship("Report", back_populates="session", cascade="all, delete-orphan")
+    recording = relationship("SessionRecording", back_populates="session", uselist=False, cascade="all, delete-orphan")
 
 class Transcript(Base):
     __tablename__ = "transcripts"
@@ -284,6 +289,7 @@ class DocumentSession(Base):
     instant_start = Column(Boolean, nullable=True, default=False)
     preparation_mode = Column(Boolean, nullable=True, default=False)
     skip_preparation = Column(Boolean, nullable=True, default=False)
+    analysis_status = Column(String(20), nullable=False, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="document_sessions")
@@ -385,3 +391,14 @@ class DocumentFaceMetrics(Base):
     attention_heatmap = Column(JSON, nullable=True)
 
     session = relationship("DocumentSession", back_populates="face_metrics")
+
+class SessionRecording(Base):
+    __tablename__ = "session_recordings"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    session_id = Column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), unique=True, nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    video_path = Column(String(500), nullable=False)
+    upload_time = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("Session", back_populates="recording")

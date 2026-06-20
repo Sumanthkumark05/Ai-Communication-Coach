@@ -150,3 +150,80 @@ def test_generate_topic_api_timeout():
         with patch("requests.post", side_effect=requests.exceptions.Timeout("Timeout occurred")):
             with pytest.raises(RuntimeError, match="API timeout"):
                 generate_topic_from_llm("Technology")
+
+def test_generate_topic_distribution():
+    with patch("app.services.topic_generator.settings") as mock_settings:
+        mock_settings.GEMINI_API_KEY = "AIzaFakeKey123"
+        mock_settings.GROQ_API_KEY = ""
+        mock_settings.TOPIC_GENERATOR_MODEL = "gemini-2.5-flash"
+        
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"topic": "Dummy", "category": "Dummy", "difficulty": "Dummy", "keywords": ["dummy"], "talking_points": ["point"]}'
+        mock_client.models.generate_content.return_value = mock_response
+        
+        with patch("google.genai.Client", return_value=mock_client):
+            # Generate 20 Easy topics
+            easy_topics = []
+            for _ in range(20):
+                res = generate_topic_from_llm(difficulty="Easy")
+                easy_topics.append(res)
+                assert res["difficulty"] == "Easy"
+            
+            # Generate 20 Medium topics
+            medium_topics = []
+            for _ in range(20):
+                res = generate_topic_from_llm(difficulty="Medium")
+                medium_topics.append(res)
+                assert res["difficulty"] == "Medium"
+                
+            # Generate 20 Hard topics
+            hard_topics = []
+            for _ in range(20):
+                res = generate_topic_from_llm(difficulty="Hard")
+                hard_topics.append(res)
+                assert res["difficulty"] == "Hard"
+                
+            # Verify no Easy topic appears in Hard
+            from app.services.topic_generator import EASY_TOPIC_CATEGORIES
+            easy_pool = set(sum(EASY_TOPIC_CATEGORIES.values(), []))
+            
+            for ht in hard_topics:
+                assert ht["topic"] not in easy_pool
+
+def test_generate_topic_category_mapping():
+    with patch("app.services.topic_generator.settings") as mock_settings:
+        mock_settings.GEMINI_API_KEY = "AIzaFakeKey123"
+        mock_settings.GROQ_API_KEY = ""
+        mock_settings.TOPIC_GENERATOR_MODEL = "gemini-2.5-flash"
+        
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"topic": "Dummy", "category": "Dummy", "difficulty": "Dummy", "keywords": ["dummy"], "talking_points": ["point"]}'
+        mock_client.models.generate_content.return_value = mock_response
+        
+        with patch("google.genai.Client", return_value=mock_client):
+            # Test mapped category "AI"
+            res = generate_topic_from_llm(category="AI")
+            assert res["category"] == "Technology Topics"
+            assert res["topic"] in ["Artificial Intelligence in Daily Life", "Future of Technology", "Future of Artificial Intelligence", "Digital Transformation"]
+            
+            # Test mapped category "Education"
+            res_edu = generate_topic_from_llm(category="Education")
+            assert res_edu["category"] in ["Student Topics", "Technology Topics"]
+
+def test_generate_topic_exclusions():
+    with patch("app.services.topic_generator.settings") as mock_settings:
+        mock_settings.GEMINI_API_KEY = "AIzaFakeKey123"
+        mock_settings.GROQ_API_KEY = ""
+        mock_settings.TOPIC_GENERATOR_MODEL = "gemini-2.5-flash"
+        
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"topic": "Dummy", "category": "Dummy", "difficulty": "Dummy", "keywords": ["dummy"], "talking_points": ["point"]}'
+        mock_client.models.generate_content.return_value = mock_response
+        
+        with patch("google.genai.Client", return_value=mock_client):
+            # Exclude all topics except one in "AI" Easy pool
+            res = generate_topic_from_llm(category="AI", exclude_topics=["Artificial Intelligence in Daily Life"], difficulty="Easy")
+            assert res["topic"] == "Future of Technology"

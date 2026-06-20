@@ -35,6 +35,12 @@ class DocumentService:
             self.client = None
             logger.warning("OPENAI_KEY/OPENAI_API_KEY environment variable is not configured for DocumentService.")
 
+    @property
+    def safe_client(self):
+        if self.client is None:
+            raise ValueError("OpenAI client not initialized due to missing API key configuration.")
+        return self.client
+
     def extract_text(self, file_path: str, filename: str) -> str:
         """
         Extracts raw text content from the uploaded file based on its extension.
@@ -144,97 +150,11 @@ class DocumentService:
 
     def _call_llm_json(self, prompt: str, system_prompt: str = "You are an elite coach. Output clean JSON only.") -> Dict[str, Any]:
         """
-        Unified LLM orchestrator using key fallback: OpenAI -> Gemini -> Groq.
-        Logs details for diagnostics.
+        Routes LLM requests to the centralized GroqFeedbackService using the openai/gpt-oss-120b model.
         """
-        logger.info("--- AI LLM Request Diagnostics ---")
-        logger.info(f"Document/Prompt Length: {len(prompt)} characters")
-        logger.info(f"Prompt Sent: {prompt}")
-
-        # Attempt 1: OpenAI
-        if self.client:
-            try:
-                logger.info("Attempting OpenAI (model: gpt-4o) call...")
-                res = self.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.2
-                )
-                raw_response = res.choices[0].message.content.strip()
-                logger.info(f"OpenAI Response Received: {raw_response}")
-                logger.info("----------------------------------")
-                return json.loads(raw_response)
-            except Exception as e:
-                logger.warning(f"OpenAI call failed: {e}")
-
-        # Attempt 2: Gemini
-        if settings.GEMINI_API_KEY:
-            try:
-                logger.info("Attempting Gemini (model: gemini-2.5-flash) call...")
-                from google import genai
-                from google.genai import types
-                
-                client = genai.Client(api_key=settings.GEMINI_API_KEY)
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.2,
-                        system_instruction=system_prompt
-                    )
-                )
-                if response.text:
-                    raw_response = response.text.strip()
-                    logger.info(f"Gemini Response Received: {raw_response}")
-                    logger.info("----------------------------------")
-                    return json.loads(raw_response)
-            except Exception as e:
-                logger.warning(f"Gemini call failed: {e}")
-
-        # Attempt 3: Groq
-        if settings.GROQ_API_KEY:
-            try:
-                logger.info("Attempting Groq (model: llama-3.3-70b-versatile) call...")
-                # Note: Groq json mode requires that the prompt has the word "json"
-                groq_prompt = prompt
-                if "json" not in groq_prompt.lower():
-                    groq_prompt += "\nReturn your response in clean JSON format."
-                
-                headers = {
-                    "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": groq_prompt}
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.2
-                }
-                res = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
-                    timeout=25
-                )
-                if res.status_code == 200:
-                    raw_response = res.json()["choices"][0]["message"]["content"].strip()
-                    logger.info(f"Groq Response Received: {raw_response}")
-                    logger.info("----------------------------------")
-                    return json.loads(raw_response)
-                else:
-                    logger.warning(f"Groq call failed with status code {res.status_code}: {res.text}")
-            except Exception as e:
-                logger.warning(f"Groq call failed: {e}")
-
-        raise ValueError("AI Request Failed: No AI services (OpenAI, Gemini, Groq) were available or succeeded to evaluate the request.")
+        from app.services.groq_feedback_service import GroqFeedbackService
+        groq_service = GroqFeedbackService()
+        return groq_service.call_groq_json(prompt, system_prompt, force_schema=False)
 
     def analyze_document_content(self, text: str) -> Dict[str, Any]:
         """

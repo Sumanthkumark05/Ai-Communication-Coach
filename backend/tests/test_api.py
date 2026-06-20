@@ -171,3 +171,46 @@ def test_jam_session_and_analytics():
     response = client.get("/api/jam/leaderboard")
     assert response.status_code == 200
     assert len(response.json()) == 0  # No users with completed reports
+
+
+def test_debate_flow():
+    # 1. Signup and login
+    signup_data = {
+        "email": "debater@example.com",
+        "password": "password123",
+        "name": "Debater"
+    }
+    client.post("/api/auth/signup", json=signup_data)
+    login_response = client.post("/api/auth/login", json={"email": "debater@example.com", "password": "password123"})
+    token = login_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 2. Start Debate Session
+    with patch("app.services.openai_service.OpenAIService.generate_debate_opponent_argument", return_value="Opponent opening statement") as mock_opp:
+        response = client.post("/api/debate/start?topic=AI%20vs%20Human&difficulty=Medium", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert "session_id" in data
+        assert data["opponent_statement"] == "Opponent opening statement"
+        session_id = data["session_id"]
+        mock_opp.assert_called_once()
+
+    # 3. Argue Debate Round
+    mock_scores = {"argument_quality": 85, "persuasion": 80, "logical_consistency": 90}
+
+    with patch("app.services.openai_service.OpenAIService.generate_debate_opponent_argument", return_value="Counter counter-argument") as mock_opp, \
+         patch("app.services.groq_feedback_service.GroqFeedbackService.call_groq_json", return_value=mock_scores) as mock_groq, \
+         patch("app.config.settings.GROQ_API_KEY", "test_key"):
+        
+        response = client.post(
+            f"/api/debate/{session_id}/argue?user_argument=I%20think%20humans%20have%20creativity", 
+            headers=headers
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["opponent_statement"] == "Counter counter-argument"
+        assert data["scores"]["argument_quality"] == 85
+        assert data["scores"]["persuasion"] == 80
+        assert data["scores"]["logical_consistency"] == 90
+
+

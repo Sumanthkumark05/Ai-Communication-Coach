@@ -1,45 +1,102 @@
-INFO:     Started server process [4905]
+INFO:     Started server process [3978]
 INFO:     Waiting for application startup.
+2026-06-12 00:21:17,129 - jam_analyzer - INFO - [Startup] Pre-loading Faster-Whisper model...
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
-(trapped) error reading bcrypt version
+2026-06-12 00:21:17,642 - jam_analyzer - INFO - Initializing faster-whisper model (large-v3, device=cpu, compute_type=int8)...
+2026-06-12 00:21:18,037 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Systran/faster-whisper-large-v3/revision/main "HTTP/1.1 200 OK"
+2026-06-12 00:21:21,222 - passlib.handlers.bcrypt - WARNING - (trapped) error reading bcrypt version
 Traceback (most recent call last):
   File "/Users/krishna/.gemini/antigravity/scratch/jam-ai-analyzer/backend/venv/lib/python3.11/site-packages/passlib/handlers/bcrypt.py", line 620, in _load_backend_mixin
     version = _bcrypt.__about__.__version__
               ^^^^^^^^^^^^^^^^^
 AttributeError: module 'bcrypt' has no attribute '__about__'
-INFO:     127.0.0.1:51893 - "POST /api/auth/signup HTTP/1.1" 201 Created
-INFO:     127.0.0.1:51895 - "POST /api/auth/login HTTP/1.1" 200 OK
-OpenAI call failed: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
-Gemini call failed: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 30.328430593s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '30s'}]}}
-OpenAI call failed: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
-Gemini call failed: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 24.956913983s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '24s'}]}}
-INFO:     127.0.0.1:51897 - "POST /api/document/upload HTTP/1.1" 200 OK
-INFO:     127.0.0.1:51907 - "POST /api/document/session HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49862 - "POST /api/auth/signup HTTP/1.1" 201 Created
+INFO:     127.0.0.1:49862 - "POST /api/auth/login HTTP/1.1" 200 OK
+2026-06-12 00:21:21,974 - jam_analyzer - INFO - [OpenAIService] Initializing OpenAI Client...
+2026-06-12 00:21:21,974 - jam_analyzer - INFO - [OpenAIService] API key found (length: 164). Creating OpenAI client...
+2026-06-12 00:21:21,992 - jam_analyzer - INFO - [OpenAIService] OpenAI client successfully initialized.
+2026-06-12 00:21:24,228 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:24,229 - openai._base_client - INFO - Retrying request to /chat/completions in 0.395525 seconds
+2026-06-12 00:21:24,969 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:24,969 - openai._base_client - INFO - Retrying request to /chat/completions in 0.835183 seconds
+2026-06-12 00:21:26,069 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:26,070 - jam_analyzer - ERROR - OpenAI chat.completions.create failed: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}. Returning mock debate statement.
+INFO:     127.0.0.1:49862 - "POST /api/debate/start?topic=Should%20artificial%20intelligence%20be%20used%20to%20automate%20creative%20writing?&difficulty=Medium HTTP/1.1" 200 OK
+2026-06-12 00:21:26,097 - jam_analyzer - INFO - [Debate Upload] Received video upload request. Saving video to: 'uploads/debate_795e6d58-4e24-4941-a41d-4d49ac0adb22_0.mp4'...
+2026-06-12 00:21:26,097 - jam_analyzer - INFO - [Debate Upload] Video saved successfully. Size: 72390 bytes.
+2026-06-12 00:21:26,097 - jam_analyzer - INFO - [Debate Upload] Stage 1: Extracting audio and generating transcript...
+2026-06-12 00:21:26,097 - jam_analyzer - INFO - --- Audio Processing Overhaul for file: debate_795e6d58-4e24-4941-a41d-4d49ac0adb22_0.mp4 ---
+2026-06-12 00:21:26,097 - jam_analyzer - INFO - Audio extraction started from uploads/debate_795e6d58-4e24-4941-a41d-4d49ac0adb22_0.mp4 to uploads/debate_795e6d58-4e24-4941-a41d-4d49ac0adb22_0.wav...
+2026-06-12 00:21:26,195 - jam_analyzer - INFO - Applying spectral noise reduction to clean static background noise...
+2026-06-12 00:21:26,275 - jam_analyzer - INFO - Audio extraction completed.
+2026-06-12 00:21:26,276 - jam_analyzer - INFO - WebRTC VAD: speech=0.30s, silence=4.71s
+2026-06-12 00:21:26,277 - jam_analyzer - INFO - Initializing faster-whisper model (large-v3, device=cpu, compute_type=int8)...
+2026-06-12 00:21:26,519 - httpx - INFO - HTTP Request: GET https://huggingface.co/api/models/Systran/faster-whisper-large-v3/revision/main "HTTP/1.1 200 OK"
+2026-06-12 00:21:31,956 - jam_analyzer - INFO - [Startup] Faster-Whisper model ready.
+2026-06-12 00:21:36,737 - jam_analyzer - INFO - Whisper transcription started...
+2026-06-12 00:21:36,942 - faster_whisper - INFO - Processing audio with duration 00:05.016
+2026-06-12 00:21:37,095 - faster_whisper - INFO - VAD filter removed 00:05.016 of audio
+2026-06-12 00:21:47,358 - faster_whisper - INFO - Detected language 'nn' with probability 0.70
+2026-06-12 00:21:47,364 - jam_analyzer - INFO - Whisper transcription completed.
+2026-06-12 00:21:47,364 - jam_analyzer - INFO - Transcript generated.
+2026-06-12 00:21:47,364 - jam_analyzer - INFO - Generated transcript: ""
+2026-06-12 00:21:47,364 - jam_analyzer - INFO - Audio metrics: speech_dur=0.3s, WPM=0, Vol=48.2
+2026-06-12 00:21:47,365 - jam_analyzer - INFO - [Debate Upload] Transcription completed. WPM: 0, Confidence: 0%
+2026-06-12 00:21:47,365 - jam_analyzer - INFO - [Debate Upload] Extracted transcript: ""
+2026-06-12 00:21:47,365 - jam_analyzer - INFO - [Debate Upload] Stage 2: Running MediaPipe face, gaze, and posture tracking...
+2026-06-12 00:21:48,421 - jam_analyzer - INFO - Opening video file for advanced MediaPipe Holistic analysis: uploads/debate_795e6d58-4e24-4941-a41d-4d49ac0adb22_0.mp4
 WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-I0000 00:00:1781172003.331164  241667 gl_context.cc:357] GL version: 2.1 (2.1 ATI-7.1.6), renderer: AMD Radeon Pro 5300M OpenGL Engine
+I0000 00:00:1781203909.351702   55904 gl_context.cc:357] GL version: 2.1 (2.1 ATI-7.1.6), renderer: AMD Radeon Pro 5300M OpenGL Engine
 INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
-W0000 00:00:1781172003.533852  243008 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
-W0000 00:00:1781172003.560481  243004 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
-W0000 00:00:1781172003.563530  243009 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
-W0000 00:00:1781172003.563609  243007 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
-W0000 00:00:1781172003.565158  243005 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
-W0000 00:00:1781172003.577633  243009 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
-W0000 00:00:1781172003.584078  243003 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
-W0000 00:00:1781172003.588224  243004 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
-/Users/krishna/.gemini/antigravity/scratch/jam-ai-analyzer/backend/venv/lib/python3.11/site-packages/google/protobuf/symbol_database.py:55: UserWarning: SymbolDatabase.GetPrototype() is deprecated. Please use message_factory.GetMessageClass() instead. SymbolDatabase.GetPrototype() will be removed soon.
-  warnings.warn('SymbolDatabase.GetPrototype() is deprecated. Please '
-Gemini evaluation failed: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 45.576148587s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '45s'}]}}. Trying Groq fallback...
-OpenAI call failed: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
-Gemini call failed: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 36.485296876s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '36s'}]}}
-INFO:     127.0.0.1:51909 - "POST /api/document/session/5e91bc42-bd59-4279-abb3-5927959a5df1/upload HTTP/1.1" 200 OK
-OpenAI call failed: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
-Gemini call failed: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 31.14372318s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'location': 'global', 'model': 'gemini-2.5-flash'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '31s'}]}}
-INFO:     127.0.0.1:51928 - "POST /api/document/viva/start HTTP/1.1" 200 OK
-Saved viva answer file uploads/viva_29be8b93-874f-4c0f-9d69-5981ae1c6dd3_q0.webm with size: 6367330 bytes
-Speech results for Viva answer: {'raw_transcript': 'Uh, actually.', 'transcript': '', 'words_per_minute': 30, 'speech_duration': 3.96, 'silence_duration': 19.02, 'filler_words': {'um': 0, 'uh': 1, 'ah': 0, 'er': 0, 'like': 0, 'you know': 0, 'actually': 1, 'basically': 0, 'literally': 0, 'sort of': 0, 'kind of': 0}, 'pause_count': 0, 'pause_duration': 0.0, 'vocabulary_score': 100, 'speaking_pace_score': 30, 'filler_occurrences': [{'filler': 'uh', 'start': np.float64(2.8), 'end': np.float64(3.24)}, {'filler': 'actually', 'start': np.float64(4.49), 'end': np.float64(5.55)}], 'duration': 22.98, 'transcript_confidence': 82, 'average_volume': 109.59, 'vad_speech_duration': 3.96, 'vad_silence_duration': 19.02}
-OpenAI call failed: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
-Gemini call failed: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-2.5-flash\nPlease retry in 4.546332854s.', 'status': 'RESOURCE_EXHAUSTED', 'details': [{'@type': 'type.googleapis.com/google.rpc.Help', 'links': [{'description': 'Learn more about Gemini API quotas', 'url': 'https://ai.google.dev/gemini-api/docs/rate-limits'}]}, {'@type': 'type.googleapis.com/google.rpc.QuotaFailure', 'violations': [{'quotaMetric': 'generativelanguage.googleapis.com/generate_content_free_tier_requests', 'quotaId': 'GenerateRequestsPerDayPerProjectPerModel-FreeTier', 'quotaDimensions': {'model': 'gemini-2.5-flash', 'location': 'global'}, 'quotaValue': '20'}]}, {'@type': 'type.googleapis.com/google.rpc.RetryInfo', 'retryDelay': '4s'}]}}
-INFO:     127.0.0.1:51932 - "POST /api/document/viva/29be8b93-874f-4c0f-9d69-5981ae1c6dd3/answer?question_index=0 HTTP/1.1" 200 OK
-INFO:     127.0.0.1:51940 - "GET /api/auth/me HTTP/1.1" 200 OK
-INFO:     127.0.0.1:51942 - "GET /api/jam/analytics HTTP/1.1" 200 OK
+W0000 00:00:1781203909.532405   56960 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1781203909.557068   56965 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1781203909.560204   56970 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1781203909.560265   56960 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1781203909.561484   56965 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1781203909.572920   56969 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1781203909.578300   56965 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+W0000 00:00:1781203909.580829   56970 inference_feedback_manager.cc:114] Feedback manager requires a model with a single signature inference. Disabling support for feedback tensors.
+2026-06-12 00:21:50,040 - jam_analyzer - INFO - [Debate Upload] MediaPipe tracking finished. Eye contact: 50.0%, Posture: 60.0%
+2026-06-12 00:21:50,040 - jam_analyzer - INFO - [Debate Upload] Stage 3: Initializing OpenAI service for counter-argument generation & evaluation...
+2026-06-12 00:21:50,040 - jam_analyzer - INFO - [OpenAIService] Initializing OpenAI Client...
+2026-06-12 00:21:50,040 - jam_analyzer - INFO - [OpenAIService] API key found (length: 164). Creating OpenAI client...
+2026-06-12 00:21:50,054 - jam_analyzer - INFO - [OpenAIService] OpenAI client successfully initialized.
+2026-06-12 00:21:50,054 - jam_analyzer - INFO - [Debate Upload] Generating opposing counter-argument...
+2026-06-12 00:21:50,659 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:50,660 - openai._base_client - INFO - Retrying request to /chat/completions in 0.393166 seconds
+2026-06-12 00:21:51,410 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:51,411 - openai._base_client - INFO - Retrying request to /chat/completions in 0.993081 seconds
+2026-06-12 00:21:52,676 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:52,677 - jam_analyzer - ERROR - OpenAI chat.completions.create failed: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}. Returning mock debate statement.
+2026-06-12 00:21:52,677 - jam_analyzer - INFO - [Debate Upload] Generated rebuttal statement: "While your statement on 'Should artificial intelligence be used to automate creative writing?' offers an interesting perspective, we must consider the counter-argument. From a 'Medium' point of view, there are significant ethical, logistical, and structural risks associated with this stance. A balanced analysis reveals major flaws in that approach."
+2026-06-12 00:21:52,677 - jam_analyzer - INFO - [Debate Upload] Running multi-dimensional argument evaluation...
+2026-06-12 00:21:52,949 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:52,949 - openai._base_client - INFO - Retrying request to /chat/completions in 0.401186 seconds
+2026-06-12 00:21:53,676 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:53,676 - openai._base_client - INFO - Retrying request to /chat/completions in 0.946024 seconds
+2026-06-12 00:21:54,904 - httpx - INFO - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 429 Too Many Requests"
+2026-06-12 00:21:54,905 - jam_analyzer - ERROR - [Debate Upload] Failed evaluating debate video: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
+Traceback (most recent call last):
+  File "/Users/krishna/.gemini/antigravity/scratch/jam-ai-analyzer/backend/app/routers/debate.py", line 276, in upload_debate_video
+    res = openai_service.client.chat.completions.create(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/krishna/.gemini/antigravity/scratch/jam-ai-analyzer/backend/venv/lib/python3.11/site-packages/openai/_utils/_utils.py", line 298, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/krishna/.gemini/antigravity/scratch/jam-ai-analyzer/backend/venv/lib/python3.11/site-packages/openai/resources/chat/completions/completions.py", line 1251, in create
+    return self._post(
+           ^^^^^^^^^^^
+  File "/Users/krishna/.gemini/antigravity/scratch/jam-ai-analyzer/backend/venv/lib/python3.11/site-packages/openai/_base_client.py", line 1332, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/krishna/.gemini/antigravity/scratch/jam-ai-analyzer/backend/venv/lib/python3.11/site-packages/openai/_base_client.py", line 1105, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.RateLimitError: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, read the docs: https://platform.openai.com/docs/guides/error-codes/api-errors.', 'type': 'insufficient_quota', 'param': None, 'code': 'insufficient_quota'}}
+INFO:     127.0.0.1:49862 - "POST /api/debate/session/795e6d58-4e24-4941-a41d-4d49ac0adb22/upload HTTP/1.1" 500 Internal Server Error
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [3978]
+/usr/local/Cellar/python@3.11/3.11.15_1/Frameworks/Python.framework/Versions/3.11/lib/python3.11/multiprocessing/resource_tracker.py:254: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

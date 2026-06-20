@@ -10,7 +10,9 @@ from app.database import engine, Base
 from app.config import settings
 from app.routers import auth, jam, debate, interview, coach, document_analyzer
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("jam_analyzer")
+logger.setLevel(logging.INFO)
 
 # Dynamically handle table renames before metadata.create_all
 try:
@@ -45,6 +47,15 @@ try:
         if 'skip_preparation' not in columns:
             logger.info("Database migration: adding skip_preparation to sessions table")
             conn.execute(text("ALTER TABLE sessions ADD COLUMN skip_preparation BOOLEAN DEFAULT 0"))
+        if 'final_score' not in columns:
+            logger.info("Database migration: adding final_score to sessions table")
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN final_score INTEGER DEFAULT 0"))
+        if 'difficulty' not in columns:
+            logger.info("Database migration: adding difficulty to sessions table")
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN difficulty VARCHAR(50) DEFAULT 'Medium'"))
+        if 'session_metadata' not in columns:
+            logger.info("Database migration: adding session_metadata to sessions table")
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN session_metadata TEXT DEFAULT NULL"))
             
         # Dynamic columns check for communication_dna
         dna_cols = [c['name'] for c in inspector.get_columns('communication_dna')]
@@ -116,6 +127,7 @@ app.include_router(jam.api_router, prefix="/api")
 app.include_router(debate.router, prefix="/api")
 app.include_router(interview.router, prefix="/api")
 app.include_router(coach.router, prefix="/api")
+app.include_router(coach.api_router, prefix="/api")
 app.include_router(document_analyzer.router, prefix="/api")
 
 @app.get("/")

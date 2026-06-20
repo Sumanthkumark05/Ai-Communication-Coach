@@ -1,10 +1,30 @@
 import logging
+import time
 import math
 import cv2
 import numpy as np
 from typing import Dict, Any, List, Tuple
 
 logger = logging.getLogger("jam_analyzer")
+
+# Global cached MediaPipe Holistic model — initialized once per server process
+_holistic = None
+_MAX_FRAMES = 150  # Process at most 150 sampled frames (~30 s of a 5 fps sample)
+
+def get_holistic():
+    global _holistic
+    if _holistic is None:
+        import mediapipe.python.solutions.holistic as mp_holistic
+        logger.info("[Vision] Initializing MediaPipe Holistic model (first request)...")
+        _holistic = mp_holistic.Holistic(
+            static_image_mode=False,
+            model_complexity=1,
+            refine_face_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+        logger.info("[Vision] MediaPipe Holistic model ready and cached.")
+    return _holistic
 
 def estimate_gaze_hit(left_eye_pts: List[np.ndarray], left_iris_pt: np.ndarray,
                       right_eye_pts: List[np.ndarray], right_iris_pt: np.ndarray) -> Tuple[bool, str]:
@@ -97,16 +117,17 @@ def process_video(video_path: str) -> Dict[str, Any]:
     """
     Processes the recording using MediaPipe Holistic (Face Mesh + Pose + Hands).
     Extracts visual behavior metrics for communication analysis.
+    Uses a globally cached Holistic model and caps frame processing at _MAX_FRAMES.
     """
     import av
-    import mediapipe.python.solutions.holistic as mp_holistic
-    
-    logger.info(f"Opening video file for advanced MediaPipe Holistic analysis: {video_path}")
+
+    logger.info(f"[Vision] Opening video for MediaPipe Holistic analysis: {video_path}")
+    t0 = time.time()
     try:
         container = av.open(video_path)
         video_stream = container.streams.video[0]
     except Exception as e:
-        logger.error(f"Failed to open video file {video_path}: {e}")
+        logger.error(f"[Vision] Failed to open video file {video_path}: {e}")
         return get_fallback_metrics()
         
     width = video_stream.width
@@ -140,18 +161,15 @@ def process_video(video_path: str) -> Dict[str, Any]:
     prev_left_wrist = None
     prev_right_wrist = None
     
-    # Initialize Holistic
-    holistic = mp_holistic.Holistic(
-        static_image_mode=False,
-        model_complexity=1,
-        refine_face_landmarks=True,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
+    # Use global cached model
+    holistic = get_holistic()
     
     frame_idx = 0
     for frame in container.decode(video_stream):
         if frame_idx % sample_rate == 0:
+            if processed_count >= _MAX_FRAMES:
+                logger.info(f"[Vision] Frame cap reached ({_MAX_FRAMES} sampled frames). Stopping early.")
+                break
             processed_count += 1
             rgb_frame = frame.to_ndarray(format='rgb24')
             results = holistic.process(rgb_frame)
@@ -263,7 +281,9 @@ def process_video(video_path: str) -> Dict[str, Any]:
         frame_idx += 1
         
     container.close()
-    holistic.close()
+    # NOTE: Do NOT close the global holistic model — it is reused across requests
+    elapsed_vision = time.time() - t0
+    logger.info(f"[Vision] MediaPipe processing finished in {elapsed_vision:.2f}s — {processed_count} frames analysed.")
     
     # Fallback to defaults if no face or pose was detected
     if face_detected_count == 0:
