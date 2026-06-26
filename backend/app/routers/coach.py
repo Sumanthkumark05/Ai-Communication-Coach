@@ -2,23 +2,82 @@ import logging
 import time
 import uuid
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session as DBSession
 
 from app.database import get_db, SessionLocal
-from app.models import User, CommunicationDNA, CoachRecommendation, ChallengeHistory, GrowthMetrics, Session, Transcript
+from app.models import User, CommunicationDNA, CoachRecommendation, ChallengeHistory, GrowthMetrics, Session, Transcript, BackgroundJob
 from app.schemas import CommunicationDNASchema, ChallengeOut
 from app.auth import get_current_user
-from app.services.groq_feedback_service import GroqFeedbackService
+from app.services.groq_service import GroqService
 
 logger = logging.getLogger("jam_analyzer")
 
 router = APIRouter(prefix="/coach", tags=["coach"])
 api_router = APIRouter(tags=["coach"])
 
-COACH_JOBS: Dict[str, Dict[str, Any]] = {}
+# ---------------------------------------------------------------------------
+# DB-backed job helpers — replaces the ephemeral COACH_JOBS in-memory dict
+# ---------------------------------------------------------------------------
+
+def _db_create_job(user_id: str, job_id: str) -> None:
+    """Insert a new pending job row into background_jobs."""
+    db = SessionLocal()
+    try:
+        job = BackgroundJob(
+            id=job_id,
+            user_id=user_id,
+            job_type="coach_recommendations",
+            status="pending",
+            progress=0,
+            message="Queueing recommendations background job...",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(job)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _db_update_job(job_id: str, **kwargs) -> None:
+    """Patch fields on an existing job row."""
+    db = SessionLocal()
+    try:
+        job = db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+        if not job:
+            return
+        for k, v in kwargs.items():
+            setattr(job, k, v)
+        job.updated_at = datetime.utcnow()
+        db.commit()
+    finally:
+        db.close()
+
+
+def _db_get_job(job_id: str) -> Optional[BackgroundJob]:
+    """Return a BackgroundJob row or None."""
+    db = SessionLocal()
+    try:
+        return db.query(BackgroundJob).filter(BackgroundJob.id == job_id).first()
+    finally:
+        db.close()
+
+
+def _db_find_active_job(user_id: str) -> Optional[str]:
+    """Return the ID of an in-flight job for this user, or None."""
+    db = SessionLocal()
+    try:
+        job = db.query(BackgroundJob).filter(
+            BackgroundJob.user_id == user_id,
+            BackgroundJob.job_type == "coach_recommendations",
+            BackgroundJob.status.in_(["pending", "processing"]),
+        ).order_by(BackgroundJob.created_at.desc()).first()
+        return job.id if job else None
+    finally:
+        db.close()
 
 
 @router.get("/dna", response_model=CommunicationDNASchema)
@@ -79,15 +138,14 @@ def get_current_dna(
             detail="Internal analysis generation or display error. Please try again."
         )
 
-async def run_recommendations_generation_job(user_id: int, job_id: str):
+async def run_recommendations_generation_job(user_id: str, job_id: str):
     """
     Asynchronous background task to generate recommendations.
+    Writes all state to the `background_jobs` table so it survives restarts.
     """
     start_time = time.time()
     logger.info("Starting recommendation generation")
-    COACH_JOBS[job_id]["status"] = "processing"
-    COACH_JOBS[job_id]["progress"] = 10
-    COACH_JOBS[job_id]["message"] = "Fetching user session history from database..."
+    _db_update_job(job_id, status="processing", progress=10, message="Fetching user session history from database...")
 
     db_load_start = time.time()
     def load_data():
@@ -124,8 +182,7 @@ async def run_recommendations_generation_job(user_id: int, job_id: str):
         db_load_time = time.time() - db_load_start
         logger.info(f"[PERF] Database queries execution time: {db_load_time:.4f}s")
         
-        COACH_JOBS[job_id]["progress"] = 30
-        COACH_JOBS[job_id]["message"] = "Preparing speaking habit profile..."
+        _db_update_job(job_id, progress=30, message="Preparing speaking habit profile...")
 
         if not has_sessions:
             logger.info("[AI Coach] User has no completed sessions. Returning onboarding fallback.")
@@ -177,14 +234,10 @@ async def run_recommendations_generation_job(user_id: int, job_id: str):
             logger.info(f"[PERF] Recommendation generation: {total_execution:.4f}s")
             logger.info(f"[PERF] Total endpoint execution: {total_execution:.4f}s")
 
-            COACH_JOBS[job_id]["progress"] = 100
-            COACH_JOBS[job_id]["status"] = "completed"
-            COACH_JOBS[job_id]["result"] = fallback_res
-            COACH_JOBS[job_id]["message"] = "Onboarding recommendations generated."
+            _db_update_job(job_id, progress=100, status="completed", result=fallback_res, message="Onboarding recommendations generated.")
             return
 
-        COACH_JOBS[job_id]["progress"] = 40
-        COACH_JOBS[job_id]["message"] = "Constructing analysis coach prompt..."
+        _db_update_job(job_id, progress=40, message="Constructing analysis coach prompt...")
 
         prompt = f"""
         You are the Twin AI Communications Coach. Analyze the user's communication history and generate personalized coaching feedback, suggestions, action plans, and practice challenges.
@@ -214,11 +267,10 @@ async def run_recommendations_generation_job(user_id: int, job_id: str):
         Return ONLY clean, raw JSON matching this schema. Do not enclose the output in markdown code blocks.
         """
 
-        COACH_JOBS[job_id]["progress"] = 60
-        COACH_JOBS[job_id]["message"] = "Requesting insights from Groq Coach API..."
+        _db_update_job(job_id, progress=60, message="Requesting insights from Groq Coach API...")
 
         llm_start = time.time()
-        groq_service = GroqFeedbackService()
+        groq_service = GroqService()
         
         try:
             async with asyncio.timeout(60):
@@ -263,8 +315,7 @@ async def run_recommendations_generation_job(user_id: int, job_id: str):
                 "coaching_feedback": "Coaching analysis could not be generated. Please try again."
             }
 
-        COACH_JOBS[job_id]["progress"] = 80
-        COACH_JOBS[job_id]["message"] = "Persisting personalized roadmap to database..."
+        _db_update_job(job_id, progress=80, message="Persisting personalized roadmap to database...")
 
         db_save_start = time.time()
         def save_roadmap():
@@ -345,17 +396,11 @@ async def run_recommendations_generation_job(user_id: int, job_id: str):
         logger.info(f"[PERF] Recommendation generation: {total_execution:.4f}s")
         logger.info(f"[PERF] Total endpoint execution: {total_execution:.4f}s")
 
-        COACH_JOBS[job_id]["progress"] = 100
-        COACH_JOBS[job_id]["status"] = "completed"
-        COACH_JOBS[job_id]["result"] = parsed_data
-        COACH_JOBS[job_id]["message"] = "Recommendations generated successfully."
+        _db_update_job(job_id, progress=100, status="completed", result=parsed_data, message="Recommendations generated successfully.")
 
     except Exception as e:
         logger.exception(f"Error in background task for recommendations: {e}")
-        COACH_JOBS[job_id]["status"] = "failed"
-        COACH_JOBS[job_id]["progress"] = 100
-        COACH_JOBS[job_id]["message"] = "Coaching recommendation generation failed."
-        COACH_JOBS[job_id]["error"] = str(e)
+        _db_update_job(job_id, status="failed", progress=100, message="Coaching recommendation generation failed.", error=str(e))
 
 
 @router.get("/recommendations")
@@ -367,24 +412,19 @@ async def get_recommendations(
     """
     Returns recent AI Coach actionable suggestions, dynamically generated on-the-fly using Groq.
     Initiates a background job to handle the intensive API and database load.
+    Jobs are persisted in the `background_jobs` table so they survive restarts.
     """
     logger.info("Request Received")
     logger.info("AI Coach Request Started")
     
-    # Check if there is an active job for this user
-    for j_id, job in COACH_JOBS.items():
-        if job.get("user_id") == current_user.id and job.get("status") in ["pending", "processing"]:
-            logger.info(f"Reusing active job {j_id} for user {current_user.id}")
-            return {"job_id": j_id, "status": job["status"]}
+    # Check if there is an active job for this user in the DB
+    active_job_id = _db_find_active_job(current_user.id)
+    if active_job_id:
+        logger.info(f"Reusing active DB job {active_job_id} for user {current_user.id}")
+        return {"job_id": active_job_id, "status": "processing"}
 
     job_id = str(uuid.uuid4())
-    COACH_JOBS[job_id] = {
-        "user_id": current_user.id,
-        "status": "pending",
-        "progress": 0,
-        "message": "Queueing recommendations background job...",
-        "created_at": time.time()
-    }
+    _db_create_job(user_id=current_user.id, job_id=job_id)
     
     background_tasks.add_task(
         run_recommendations_generation_job,
@@ -392,7 +432,7 @@ async def get_recommendations(
         job_id=job_id
     )
     
-    logger.info(f"Job {job_id} successfully queued.")
+    logger.info(f"Job {job_id} successfully queued (DB-persisted).")
     return {"job_id": job_id, "status": "pending"}
 
 
@@ -400,13 +440,25 @@ async def get_recommendations(
 async def get_job_status(job_id: str):
     """
     Returns the execution status, progress, and results of a coach recommendations job.
+    Reads from the persistent `background_jobs` table — survives backend restarts.
     """
-    if job_id not in COACH_JOBS:
+    job = _db_get_job(job_id)
+    if not job:
         raise HTTPException(
             status_code=404,
             detail="Job not found."
         )
-    return COACH_JOBS[job_id]
+    return {
+        "job_id": job.id,
+        "user_id": job.user_id,
+        "status": job.status,
+        "progress": job.progress,
+        "message": job.message or "",
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+    }
 
 @router.get("/challenges", response_model=List[ChallengeOut])
 def get_challenges(

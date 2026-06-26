@@ -4,7 +4,7 @@ import requests
 import json
 import time
 
-BASE_URL = "http://localhost:8000/api"
+BASE_URL = "http://127.0.0.1:8000/api"
 
 def run_test():
     print("=== STARTING DOCUMENT ANALYZER E2E TEST ===")
@@ -91,6 +91,8 @@ def run_test():
     
     # 6. Upload a real webm audio/video file for session speech analysis
     real_webm_path = "backend/uploads/032df2db-61f7-46c6-a5fb-5e817d4b570f.webm"
+    if not os.path.exists(real_webm_path):
+        real_webm_path = "uploads/032df2db-61f7-46c6-a5fb-5e817d4b570f.webm"
     print(f"\n5. Uploading real speaking recording to analyze speech...")
     with open(real_webm_path, "rb") as f:
         files = {"file": ("recording.webm", f, "video/webm")}

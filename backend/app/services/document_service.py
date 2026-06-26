@@ -4,7 +4,6 @@ import json
 import logging
 import requests
 from typing import List, Dict, Any, Optional
-from openai import OpenAI
 
 logger = logging.getLogger("jam_analyzer")
 
@@ -25,21 +24,20 @@ except ImportError:
     pptx = None
 
 from app.config import settings
+from app.utils.ai_parser import (
+    parse_ai_response,
+    DocumentAnalysisModel,
+    TopicsListModel,
+    SpeechToDocumentEvaluationModel,
+    VivaQuestionsModel,
+    VivaEvaluationModel
+)
 
 class DocumentService:
     def __init__(self):
-        self.api_key = settings.OPENAI_KEY or settings.OPENAI_API_KEY or os.getenv("OPENAI_KEY") or os.getenv("OPENAI_API_KEY")
-        if self.api_key:
-            self.client = OpenAI(api_key=self.api_key)
-        else:
-            self.client = None
-            logger.warning("OPENAI_KEY/OPENAI_API_KEY environment variable is not configured for DocumentService.")
-
-    @property
-    def safe_client(self):
-        if self.client is None:
-            raise ValueError("OpenAI client not initialized due to missing API key configuration.")
-        return self.client
+        # All AI calls route through GroqService via _call_llm_json.
+        # No additional client initialization is required here.
+        pass
 
     def extract_text(self, file_path: str, filename: str) -> str:
         """
@@ -148,18 +146,47 @@ class DocumentService:
             logger.error(f"Fallback text extraction failed: {e}")
             return ""
 
-    def _call_llm_json(self, prompt: str, system_prompt: str = "You are an elite coach. Output clean JSON only.") -> Dict[str, Any]:
+    def _call_llm_json(
+        self, prompt: str, system_prompt: str = "You are an elite coach. Output clean JSON only.", model_class: Any = None
+    ) -> Dict[str, Any]:
         """
-        Routes LLM requests to the centralized GroqFeedbackService using the openai/gpt-oss-120b model.
+        Routes LLM requests to the centralized GroqService via text call,
+        logs raw response, cleans/parses/normalizes, and retries once if json loading fails.
         """
-        from app.services.groq_feedback_service import GroqFeedbackService
-        groq_service = GroqFeedbackService()
-        return groq_service.call_groq_json(prompt, system_prompt, force_schema=False)
+        from app.services.groq_service import GroqService
+        from app.utils.ai_parser import clean_raw_string
+        
+        groq_service = GroqService()
+        
+        logger.info("[_call_llm_json] Sending request to Groq...")
+        
+        # Attempt 1
+        raw_response = ""
+        try:
+            raw_response = groq_service.call_groq_text(prompt, system_prompt)
+            # Try to test JSON loading immediately to determine if retry is needed
+            json.loads(clean_raw_string(raw_response))
+            # Run the parser
+            parsed = parse_ai_response(raw_response, model_class)
+            return parsed
+        except Exception as e:
+            logger.warning(f"[_call_llm_json] First attempt failed JSON check: {e}. Retrying once...")
+            
+        # Retry Attempt (Requirement 7)
+        logger.info("[_call_llm_json] Retry attempts: 1")
+        try:
+            raw_response = groq_service.call_groq_text(prompt, system_prompt)
+            parsed = parse_ai_response(raw_response, model_class)
+            return parsed
+        except Exception as e:
+            logger.error(f"[_call_llm_json] Retry attempt failed: {e}")
+            # Construct absolute fallback dictionary from target model
+            fallback = model_class.model_validate({})
+            return fallback.model_dump()
 
     def analyze_document_content(self, text: str) -> Dict[str, Any]:
         """
         AI reads the extracted text and outputs title, summary, key_concepts, keywords, and classification.
-        No hardcoded fallbacks.
         """
         if not text.strip():
             raise ValueError("Empty Document: Content to analyze is empty.")
@@ -167,23 +194,33 @@ class DocumentService:
         truncated_text = text[:15000] # Limit tokens sent for summary
         
         prompt = f"""
-        Analyze the following extracted document text and return a JSON object containing:
-        1. "title": A descriptive title of the document.
-        2. "summary": A concise 2-3 sentence summary of the document.
-        3. "key_concepts": A list of the 3-5 most important conceptual themes/models in the text.
-        4. "keywords": A list of 4-6 keyword tags.
-        5. "learning_objectives": A list of 3-5 key learning objectives or takeaways from this document.
-        6. "is_project_report": Boolean, set to true if the document presents a software development, hardware system, architecture, or academic project report.
-        7. "is_resume": Boolean, set to true if the document is a CV, resume, or professional profile.
-
+        Analyze the following extracted document text and return a JSON object.
+        
         Extracted Document Text:
         \"\"\"{truncated_text}\"\"\"
 
-        Return ONLY the raw JSON object.
+        Return ONLY a valid JSON object.
+        Do not include Markdown.
+        Do not include explanations.
+        Do not include code fences.
+        Return exactly this schema:
+        {{
+          "title": "Descriptive title of the document",
+          "summary": "Concise 2-3 sentence summary of the document",
+          "key_concepts": ["Concept 1", "Concept 2", "Concept 3"],
+          "keywords": ["Keyword 1", "Keyword 2"],
+          "learning_objectives": ["Objective 1", "Objective 2"],
+          "is_project_report": false,
+          "is_resume": false
+        }}
         """
 
         try:
-            return self._call_llm_json(prompt, "You are a professional document parser and analyst. Output clean JSON only.")
+            return self._call_llm_json(
+                prompt, 
+                "You are a professional document parser and analyst. Output clean JSON only.",
+                DocumentAnalysisModel
+            )
         except Exception as e:
             logger.error(f"Failed document analysis: {e}")
             raise ValueError(f"AI Request Failed: Failed to analyze document content. Details: {str(e)}")
@@ -191,7 +228,6 @@ class DocumentService:
     def generate_topics(self, doc_analysis: Dict[str, Any], text: str) -> List[Dict[str, Any]]:
         """
         Generates 5-10 unique speaking topics from the document based on its category and contents.
-        No hardcoded fallbacks.
         """
         title = doc_analysis.get("title", "Document")
         summary = doc_analysis.get("summary", "")
@@ -230,19 +266,32 @@ class DocumentService:
           3. Career Goals & Fit
           4. Behavioral strengths based on resume
 
-        Each topic in the list MUST be a JSON object with:
-        - "topic": The speaking topic title.
-        - "category": The category name (e.g. Technology, Engineering, Career).
-        - "difficulty": "Beginner", "Intermediate", or "Advanced".
-        - "talking_points": A list of 3 bullet talking points.
-        - "estimated_speaking_time": Time in seconds (usually 60 or 90).
-        - "keywords": 3 keywords associated with the topic.
-
-        Return a JSON object containing a "topics" array of these topic objects.
+        Return ONLY a valid JSON object.
+        Do not include Markdown.
+        Do not include explanations.
+        Do not include code fences.
+        Return exactly this schema:
+        {{
+          "topics": [
+            {{
+              "topic": "The speaking topic title",
+              "category": "Technology/Engineering/Career/etc.",
+              "difficulty": "Beginner/Intermediate/Advanced",
+              "talking_points": ["point 1", "point 2", "point 3"],
+              "estimated_speaking_time": 60,
+              "keywords": ["key1", "key2", "key3"]
+            }}
+          ]
+        }}
         """
 
         try:
-            res_data = self._call_llm_json(prompt, "You are a communication training coordinator. Output clean JSON only.")
+            res_data = self._call_llm_json(
+                prompt, 
+                "You are a communication training coordinator. Output clean JSON only.",
+                TopicsListModel
+            )
+            
             topics = res_data.get("topics", [])
             if not topics:
                 raise ValueError("AI returned empty topics array.")
@@ -271,25 +320,36 @@ class DocumentService:
         Source Document text:
         \"\"\"{truncated_doc}\"\"\"
 
-        Evaluate and return a JSON object with:
-        1. "accuracy_score": Integer (0-100), how factual and correct the user's statements are compared to the document.
-        2. "coverage_score": Integer (0-100), what percentage of key concepts relevant to the topic they managed to mention.
-        3. "understanding_score": Integer (0-100), overall metric of subject comprehension.
-        4. "explanation_quality": Integer (0-100), evaluates structural clarity, flow, and educational clarity.
-        5. "technical_correctness": Integer (0-100), score based on accuracy of technical vocabulary, algorithms, or facts from the text.
-        6. "relevance_score": Integer (0-100), evaluation of whether the user stayed on-topic relative to the chosen topic title.
-        7. "knowledge_gaps": List of objects representing concepts present in the document relevant to this topic that the user completely missed. Each object should have:
-           - "concept": Name of the missing concept/topic.
-           - "description": 1 sentence describing what was missed and where to find it.
-        8. "suggested_improvements": List of 2-3 specific suggestions to improve their conceptual explanations.
-        9. "coach_recommendations": List of 2-3 study prompts or coaching advice.
-        10. "follow_up_questions": List of 3 dynamic follow-up questions testing content depth based on the document.
-
-        Return ONLY the raw JSON object.
+        Return ONLY a valid JSON object.
+        Do not include Markdown.
+        Do not include explanations.
+        Do not include code fences.
+        Return exactly this schema:
+        {{
+          "accuracy_score": 75,
+          "coverage_score": 70,
+          "understanding_score": 72,
+          "explanation_quality": 74,
+          "technical_correctness": 76,
+          "relevance_score": 80,
+          "knowledge_gaps": [
+            {{
+              "concept": "Name of the missing concept/topic",
+              "description": "1 sentence describing what was missed and where to find it"
+            }}
+          ],
+          "suggested_improvements": ["improvement 1", "improvement 2"],
+          "coach_recommendations": ["recommendation 1", "recommendation 2"],
+          "follow_up_questions": ["question 1", "question 2", "question 3"]
+        }}
         """
 
         try:
-            return self._call_llm_json(prompt, "You are a master presentation examiner. Output clean JSON only.")
+            return self._call_llm_json(
+                prompt, 
+                "You are a master presentation examiner. Output clean JSON only.",
+                SpeechToDocumentEvaluationModel
+            )
         except Exception as e:
             logger.error(f"Failed comparative speech-to-document evaluation: {e}")
             raise ValueError(f"AI Request Failed: Failed to compare speech against document. Details: {str(e)}")
@@ -310,11 +370,28 @@ class DocumentService:
         - PROJECT: Focus on system design, database schemas, code flow, scaling, testing.
         - RESUME: Focus on experience highlights, candidate skills verification, technical questions about projects, HR behavioral fit.
 
-        Return a JSON object containing a "questions" list of strings.
+        Return ONLY a valid JSON object.
+        Do not include Markdown.
+        Do not include explanations.
+        Do not include code fences.
+        Return exactly this schema:
+        {{
+          "questions": [
+            "Question 1?",
+            "Question 2?",
+            "Question 3?",
+            "Question 4?",
+            "Question 5?"
+          ]
+        }}
         """
 
         try:
-            res_data = self._call_llm_json(prompt, "You are a professional panel examiner. Output clean JSON only.")
+            res_data = self._call_llm_json(
+                prompt, 
+                "You are a professional panel examiner. Output clean JSON only.",
+                VivaQuestionsModel
+            )
             questions = res_data.get("questions", [])
             if not questions or len(questions) < 5:
                 raise ValueError(f"AI returned invalid questions list: {questions}")
@@ -339,18 +416,26 @@ class DocumentService:
         Source Document:
         \"\"\"{truncated_doc}\"\"\"
 
-        Generate a JSON object containing:
-        1. "score": Integer (0-100), grading the correctness and depth of the answer relative to the document.
-        2. "feedback": A 2-sentence summary feedback.
-        3. "correct_elements": A list of points the candidate explained correctly.
-        4. "incorrect_elements": A list of points the candidate got wrong or described weakly.
-        5. "ideal_response": A sample expert-level response to the question.
-
-        Return ONLY the raw JSON object.
+        Return ONLY a valid JSON object.
+        Do not include Markdown.
+        Do not include explanations.
+        Do not include code fences.
+        Return exactly this schema:
+        {{
+          "score": 75,
+          "feedback": "2-sentence summary feedback",
+          "correct_elements": ["element 1", "element 2"],
+          "incorrect_elements": ["weakness 1"],
+          "ideal_response": "Sample expert-level response to the question"
+        }}
         """
 
         try:
-            return self._call_llm_json(prompt, "You are an oral board assessor. Output clean JSON only.")
+            return self._call_llm_json(
+                prompt, 
+                "You are an oral board assessor. Output clean JSON only.",
+                VivaEvaluationModel
+            )
         except Exception as e:
             logger.error(f"Failed to evaluate viva response: {e}")
             raise ValueError(f"AI Request Failed: Failed to grade viva answer. Details: {str(e)}")

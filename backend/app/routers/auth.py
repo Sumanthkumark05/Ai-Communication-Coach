@@ -35,8 +35,23 @@ def signup(user_data: UserCreate, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=Token)
 def login(login_data: UserLogin, db: Session = Depends(get_db)):
+    logger.info(f"[Auth Login] Incoming login request for email: {login_data.email}")
+    logger.info(f"[Auth Login] Request payload: email={login_data.email}, password_len={len(login_data.password)}")
+    
+    logger.info(f"[Auth Login] Performing database lookup for user: {login_data.email}")
     user = db.query(User).filter(User.email == login_data.email).first()
-    if not user or not verify_password(login_data.password, user.hashed_password):
+    
+    if not user:
+        logger.warning(f"[Auth Login] Database lookup failed: user {login_data.email} not found.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        
+    logger.info(f"[Auth Login] User found. Verifying password...")
+    if not verify_password(login_data.password, user.hashed_password):
+        logger.warning(f"[Auth Login] Password verification failed for user: {login_data.email}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -45,6 +60,7 @@ def login(login_data: UserLogin, db: Session = Depends(get_db)):
     
     # Create JWT Access Token
     access_token = create_access_token(data={"sub": user.id})
+    logger.info(f"[Auth Login] Authentication successful. Access token generated for user id: {user.id}")
     logger.info("User Logged In")
     return {"access_token": access_token, "token_type": "bearer"}
 

@@ -73,8 +73,48 @@ try:
         if 'learning_objectives' not in doc_cols:
             logger.info("Database migration: adding learning_objectives to documents table")
             conn.execute(text("ALTER TABLE documents ADD COLUMN learning_objectives TEXT DEFAULT NULL"))
+
+        # Dynamic columns check for sessions (retry columns)
+        sessions_cols = [c['name'] for c in inspector.get_columns('sessions')]
+        if 'retry_count' not in sessions_cols:
+            logger.info("Database migration: adding retry_count to sessions table")
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN retry_count INTEGER DEFAULT 0"))
+        if 'last_error' not in sessions_cols:
+            logger.info("Database migration: adding last_error to sessions table")
+            conn.execute(text("ALTER TABLE sessions ADD COLUMN last_error TEXT DEFAULT NULL"))
+
+        # Dynamic columns check for document_video_sessions (retry columns)
+        doc_sess_cols = [c['name'] for c in inspector.get_columns('document_video_sessions')]
+        if 'retry_count' not in doc_sess_cols:
+            logger.info("Database migration: adding retry_count to document_video_sessions table")
+            conn.execute(text("ALTER TABLE document_video_sessions ADD COLUMN retry_count INTEGER DEFAULT 0"))
+        if 'last_error' not in doc_sess_cols:
+            logger.info("Database migration: adding last_error to document_video_sessions table")
+            conn.execute(text("ALTER TABLE document_video_sessions ADD COLUMN last_error TEXT DEFAULT NULL"))
+
+        # Dynamic columns check for background_jobs (retry columns)
+        bg_job_cols = [c['name'] for c in inspector.get_columns('background_jobs')]
+        if 'retry_count' not in bg_job_cols:
+            logger.info("Database migration: adding retry_count to background_jobs table")
+            conn.execute(text("ALTER TABLE background_jobs ADD COLUMN retry_count INTEGER DEFAULT 0"))
+        if 'last_error' not in bg_job_cols:
+            logger.info("Database migration: adding last_error to background_jobs table")
+            conn.execute(text("ALTER TABLE background_jobs ADD COLUMN last_error TEXT DEFAULT NULL"))
 except Exception as exc:
     logger.warning(f"Failed to check/run DB schema migrations: {exc}")
+
+# Create database views for table aliases if needed
+try:
+    with engine.begin() as conn:
+        conn.execute(text("DROP VIEW IF EXISTS analysis_jobs;"))
+        conn.execute(text("DROP VIEW IF EXISTS jam_reports;"))
+        conn.execute(text("DROP VIEW IF EXISTS recordings;"))
+        conn.execute(text("CREATE VIEW analysis_jobs AS SELECT * FROM background_jobs;"))
+        conn.execute(text("CREATE VIEW jam_reports AS SELECT * FROM reports;"))
+        conn.execute(text("CREATE VIEW recordings AS SELECT * FROM session_recordings;"))
+        logger.info("Database migration: created views/aliases for analysis_jobs, jam_reports, and recordings")
+except Exception as view_exc:
+    logger.warning(f"Failed to create database views/aliases: {view_exc}")
 
 app = FastAPI(
     title="AI Human Communication Twin Platform API",
@@ -83,12 +123,15 @@ app = FastAPI(
 )
 
 # Configure CORS for Frontend communication
+# Supports both localhost and 127.0.0.1 on ports 3000 and 3001 to eliminate
+# origin mismatches regardless of how the browser resolves the loopback address.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "http://192.168.2.22:3000"
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -98,16 +141,45 @@ app.add_middleware(
 # Ensure upload dir exists
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
+# Secure static file class to prevent direct access to video recordings
+class SecureStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        # Prevent direct access to files inside recordings/ directory
+        if path.startswith("recordings") or "recordings" in path.split("/"):
+            from starlette.exceptions import HTTPException as StarletteHTTPException
+            raise StarletteHTTPException(status_code=403, detail="Direct access to recordings is blocked.")
+        return await super().get_response(path, scope)
+
 # Mount upload directory as static files to allow direct streaming/playback in UI
-app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
+app.mount("/uploads", SecureStaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
 
 @app.on_event("startup")
 async def warmup_models():
     """
-    Pre-loads the Faster-Whisper large-v3 model in a background thread so the
-    first recording upload does not incur a cold-start penalty.
+    Pre-loads models and validates all external API integrations at startup.
     """
+    # ── 1. Groq API Key & Model Validation ─────────────────────────────────────────
+    def _validate_groq():
+        key = settings.GROQ_API_KEY
+        if not key:
+            raise RuntimeError("GROQ_API_KEY is not set in environment or .env. Startup aborted.")
+        
+        try:
+            from app.services.groq_service import GroqService
+            groq = GroqService()
+            res = groq.call_groq_text("Return the word OK", system_prompt="You are a health check assistant.")
+            if "OK" in res or len(res.strip()) > 0:
+                logger.info("[Startup][GROQ] ✓ API key valid. Primary model (openai/gpt-oss-120b) responds correctly.")
+            else:
+                raise RuntimeError("Groq API validation failed: Empty response or failed validation.")
+        except Exception as e:
+            raise RuntimeError(f"Groq API startup validation failed: {e}") from e
+
+    # Run validation synchronously to prevent silent failures on startup
+    _validate_groq()
+
+    # ── 2. Faster-Whisper Warm-up ─────────────────────────────────────────────
     def _load_whisper():
         try:
             from app.services.audio_processor import get_whisper_model
@@ -119,6 +191,29 @@ async def warmup_models():
 
     threading.Thread(target=_load_whisper, daemon=True).start()
 
+    # ── 3. Database Seed ─────────────────────────────────────────────────────
+    try:
+        from app.database import SessionLocal
+        from app.models import User
+        from app.auth import get_password_hash
+
+        db = SessionLocal()
+        admin_user = db.query(User).filter(User.email == "admin@gmail.com").first()
+        if not admin_user:
+            logger.info("[Startup] Seeding database: creating admin@gmail.com user...")
+            hashed_pw = get_password_hash("password123")
+            new_admin = User(
+                email="admin@gmail.com",
+                hashed_password=hashed_pw,
+                name="Admin User"
+            )
+            db.add(new_admin)
+            db.commit()
+            logger.info("[Startup] admin@gmail.com user seeded successfully.")
+        db.close()
+    except Exception as seed_exc:
+        logger.warning(f"[Startup] Database seeding failed: {seed_exc}")
+
 
 # Register Routers
 app.include_router(auth.router, prefix="/api")
@@ -126,9 +221,11 @@ app.include_router(jam.router, prefix="/api")
 app.include_router(jam.api_router, prefix="/api")
 app.include_router(debate.router, prefix="/api")
 app.include_router(interview.router, prefix="/api")
+app.include_router(interview.interviews_router, prefix="/api")
 app.include_router(coach.router, prefix="/api")
 app.include_router(coach.api_router, prefix="/api")
 app.include_router(document_analyzer.router, prefix="/api")
+app.include_router(document_analyzer.document_analyzer_recording_router, prefix="/api")
 
 @app.get("/")
 def read_root():
@@ -140,8 +237,66 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    """Standard health probe — returns {status: healthy} when the server is up."""
-    return {"status": "healthy"}
+    """
+    Detailed health probe. Checks all critical dependencies so the frontend
+    and ops tooling can diagnose partial failures instead of just 'healthy'.
+    """
+    checks: dict = {}
+
+    # 1. Database reachability
+    try:
+        from app.database import engine
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as db_exc:
+        checks["database"] = f"error: {db_exc}"
+
+    # 2. Upload directory writability
+    try:
+        test_path = os.path.join(settings.UPLOAD_DIR, ".healthcheck")
+        with open(test_path, "w") as f:
+            f.write("ok")
+        os.remove(test_path)
+        checks["uploads_dir"] = "ok"
+    except Exception as dir_exc:
+        checks["uploads_dir"] = f"error: {dir_exc}"
+
+    # 3. Groq API key presence
+    checks["groq_api_key"] = "ok" if settings.GROQ_API_KEY else "missing"
+
+    overall_ok = all(
+        v == "ok" or v.startswith("configured")
+        for v in checks.values()
+    )
+
+    return {
+        "status": "healthy" if overall_ok else "degraded",
+        "checks": checks,
+    }
+
+@app.get("/api/health/llm")
+def llm_health_check():
+    """
+    Checks the status of the central LLM provider.
+    """
+    try:
+        from app.services.groq_service import GroqService
+        groq = GroqService()
+        res = groq.call_groq_text("Return the word OK", system_prompt="Health test.")
+        if "OK" in res or len(res.strip()) > 0:
+            status = "healthy"
+        else:
+            status = "degraded"
+    except Exception as e:
+        status = f"unhealthy: {e}"
+        
+    return {
+        "provider": "groq",
+        "model": "openai/gpt-oss-120b",
+        "status": status
+    }
 
 @app.get("/debug/system")
 def debug_system():

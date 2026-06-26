@@ -6,9 +6,9 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "supersecretkey_change_me_in_production_1234567890"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-    GEMINI_API_KEY: str = ""
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    # GEMINI_API_KEY removed — Gemini is not used. Groq Whisper is the exclusive STT engine.
     TOPIC_GENERATOR_MODEL: str = ""
     UPLOAD_DIR: str = "uploads"
     OPENAI_API_KEY: str = ""
@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 settings = Settings()
 

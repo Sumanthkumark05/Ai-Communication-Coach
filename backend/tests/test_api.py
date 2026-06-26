@@ -199,7 +199,7 @@ def test_debate_flow():
     mock_scores = {"argument_quality": 85, "persuasion": 80, "logical_consistency": 90}
 
     with patch("app.services.openai_service.OpenAIService.generate_debate_opponent_argument", return_value="Counter counter-argument") as mock_opp, \
-         patch("app.services.groq_feedback_service.GroqFeedbackService.call_groq_json", return_value=mock_scores) as mock_groq, \
+         patch("app.services.groq_service.GroqService.call_groq_json", return_value=mock_scores) as mock_groq, \
          patch("app.config.settings.GROQ_API_KEY", "test_key"):
         
         response = client.post(
@@ -212,5 +212,108 @@ def test_debate_flow():
         assert data["scores"]["argument_quality"] == 85
         assert data["scores"]["persuasion"] == 80
         assert data["scores"]["logical_consistency"] == 90
+
+
+def test_document_recording_endpoints():
+    # 1. Signup and login
+    signup_data = {
+        "email": "docuser@example.com",
+        "password": "password123",
+        "name": "Doc User"
+    }
+    client.post("/api/auth/signup", json=signup_data)
+    login_response = client.post("/api/auth/login", json={"email": "docuser@example.com", "password": "password123"})
+    token = login_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 2. Upload document first
+    test_file_content = b"# Test Document\nThis is a test document."
+    from io import BytesIO
+    response = client.post(
+        "/api/document/upload",
+        files={"file": ("test_doc.md", BytesIO(test_file_content), "text/markdown")},
+        headers=headers
+    )
+    assert response.status_code == 200
+    doc_id = response.json()["id"]
+
+    # 3. Create a Document presentation session
+    session_payload = {
+        "document_id": doc_id,
+        "topic_id": None,
+        "topic_title": "Test Topic",
+        "category": "Test Category",
+        "instant_start": True,
+        "preparation_mode": False,
+        "skip_preparation": False
+    }
+    response = client.post("/api/document/session", json=session_payload, headers=headers)
+    assert response.status_code == 200
+    session_id = response.json()["id"]
+
+    # 4. Upload a mock video/audio file (this triggers creation of DocumentRecording record)
+    mock_video_content = b"fake video content bytes"
+    response = client.post(
+        f"/api/document/session/{session_id}/upload",
+        files={"file": ("recording.webm", BytesIO(mock_video_content), "video/webm")},
+        headers=headers
+    )
+    assert response.status_code == 200
+    
+    # 5. Let's create a report in the database directly to test report endpoint, or verify the recording endpoints
+    from app.models import DocumentRecording, DocumentReport
+    db = TestingSessionLocal()
+    recording = db.query(DocumentRecording).filter(DocumentRecording.session_id == session_id).first()
+    assert recording is not None
+    assert recording.session_id == session_id
+    
+    # Create a mock report linked to it
+    report = DocumentReport(
+        session_id=session_id,
+        accuracy_score=90,
+        coverage_score=85,
+        understanding_score=95,
+        explanation_quality=80,
+        technical_correctness=88,
+        relevance_score=92
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    recording.report_id = report.id
+    db.commit()
+    
+    # Extract IDs to local variables before closing session
+    rec_id = str(recording.id)
+    rep_id = str(report.id)
+    db.close()
+
+    # 6. Test GET /api/document/recording/{recording_id}
+    response = client.get(f"/api/document/recording/{rec_id}", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["recording_id"] == rec_id
+    assert data["analysis_id"] == session_id
+    assert data["report_id"] == rep_id
+    assert "token=" in data["recording_url"]
+
+    # 7. Test GET /api/document/report/{report_id}
+    response = client.get(f"/api/document/report/{rep_id}", headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["recording_id"] == rec_id
+    assert data["analysis_id"] == session_id
+    assert data["report_id"] == rep_id
+    assert "token=" in data["recording_url"]
+
+    # 8. Test GET /api/document/history
+    response = client.get("/api/document/history", headers=headers)
+    assert response.status_code == 200
+    history = response.json()
+    assert len(history) >= 1
+    assert history[0]["recording_id"] == rec_id
+    assert history[0]["analysis_id"] == session_id
+    assert history[0]["report_id"] == rep_id
+    assert "token=" in history[0]["recording_url"]
 
 

@@ -893,48 +893,7 @@ def validate_topic_data(parsed_data: Any) -> Dict[str, Any]:
         
     return parsed_data
 
-def call_gemini_topic_generator(model_name: str, user_content: str) -> Dict[str, Any]:
-    """
-    Calls the Gemini API to generate the topic.
-    """
-    if not settings.GEMINI_API_KEY:
-        raise ValueError("Model unavailable: GEMINI_API_KEY is not configured.")
-
-    try:
-        from google import genai
-        from google.genai import types
-
-        client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        prompt = f"System Prompt:\n{SYSTEM_PROMPT}\n\nUser Message:\n{user_content}"
-        
-        logger.info("Calling Gemini API for topic generation...")
-        response = client.models.generate_content(
-            model=model_name or 'gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=GeneratedTopicSchema,
-                temperature=0.85
-            )
-        )
-    except Exception as e:
-        error_msg = "Model unavailable: Connection to the Gemini API failed."
-        logger.error(f"{error_msg} details: {e}")
-        raise RuntimeError(error_msg)
-
-    res_text = response.text
-    if not res_text:
-        raise RuntimeError("Empty response: The Gemini API returned an empty response.")
-
-    try:
-        parsed_data = json.loads(res_text)
-    except Exception as json_err:
-        raise RuntimeError(f"Invalid response: Failed to parse Gemini response as JSON. Details: {json_err}")
-
-    try:
-        return validate_topic_data(parsed_data)
-    except Exception as val_err:
-        raise RuntimeError(f"Invalid response: {val_err}")
+# call_gemini_topic_generator removed as part of complete Gemini migration
 
 def call_groq_topic_generator(model_name: str, user_content: str) -> Dict[str, Any]:
     """
@@ -948,7 +907,8 @@ def call_groq_topic_generator(model_name: str, user_content: str) -> Dict[str, A
         "Content-Type": "application/json"
     }
 
-    selected_model = model_name or "llama-3.3-70b-versatile"
+    from app.config.ai_settings import TOPIC_GENERATOR_MODEL
+    selected_model = model_name or TOPIC_GENERATOR_MODEL
     payload = {
         "model": selected_model,
         "messages": [
@@ -1014,11 +974,10 @@ def call_groq_topic_generator(model_name: str, user_content: str) -> Dict[str, A
 
 def generate_topic_from_llm(category: Optional[str] = None, exclude_topics: Optional[List[str]] = None, difficulty: Optional[str] = None) -> Dict[str, Any]:
     """
-    Generates a unique discussion topic using Gemini or Groq depending on config.
-    Implements a fallback mechanism if the primary provider fails.
+    Generates a unique discussion topic using Groq.
+    Implements a fallback mechanism if the primary model fails.
     """
     is_test_env = (
-        (settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.startswith("test")) or
         (settings.GROQ_API_KEY and settings.GROQ_API_KEY.startswith("test"))
     )
 
@@ -1107,51 +1066,22 @@ def generate_topic_from_llm(category: Optional[str] = None, exclude_topics: Opti
             f"Difficulty: {selected_difficulty}\n"
         )
 
-    # Determine primary provider
-    primary_provider = None
-    model_config = settings.TOPIC_GENERATOR_MODEL.lower() if settings.TOPIC_GENERATOR_MODEL else ""
-
-    if model_config.startswith("gemini"):
-        primary_provider = "gemini"
-    elif model_config.startswith("groq") or "llama" in model_config:
-        primary_provider = "groq"
-    else:
-        if settings.GEMINI_API_KEY:
-            primary_provider = "gemini"
-        elif settings.GROQ_API_KEY:
-            primary_provider = "groq"
-
-    if not primary_provider:
-        error_msg = "Model unavailable: Neither GEMINI_API_KEY nor GROQ_API_KEY is configured."
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-
     errors = []
     topic_data = None
 
-    # Try primary provider
-    if primary_provider == "gemini":
+    try:
+        topic_data = call_groq_topic_generator(settings.TOPIC_GENERATOR_MODEL, user_content)
+    except Exception as e:
+        errors.append(f"Groq error: {e}")
+        logger.warning(f"Groq topic generation failed: {e}. Attempting fallback to GroqService...")
+        # Fallback using centralized GroqService
+        from app.services.groq_service import GroqService
+        groq = GroqService()
         try:
-            topic_data = call_gemini_topic_generator(settings.TOPIC_GENERATOR_MODEL, user_content)
-        except Exception as e:
-            errors.append(f"Gemini error: {e}")
-            logger.warning(f"Gemini topic generation failed: {e}. Attempting fallback to Groq...")
-            if settings.GROQ_API_KEY:
-                try:
-                    topic_data = call_groq_topic_generator("", user_content)
-                except Exception as fallback_e:
-                    errors.append(f"Groq fallback error: {fallback_e}")
-    else:
-        try:
-            topic_data = call_groq_topic_generator(settings.TOPIC_GENERATOR_MODEL, user_content)
-        except Exception as e:
-            errors.append(f"Groq error: {e}")
-            logger.warning(f"Groq topic generation failed: {e}. Attempting fallback to Gemini...")
-            if settings.GEMINI_API_KEY:
-                try:
-                    topic_data = call_gemini_topic_generator("", user_content)
-                except Exception as fallback_e:
-                    errors.append(f"Gemini fallback error: {fallback_e}")
+            topic_data = groq.call_groq_json(user_content, system_prompt=SYSTEM_PROMPT)
+            topic_data = validate_topic_data(topic_data)
+        except Exception as fallback_e:
+            errors.append(f"Groq fallback error: {fallback_e}")
 
     # Process and validate returned topic data
     if topic_data:

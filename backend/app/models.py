@@ -42,6 +42,8 @@ class Session(Base):
     skip_preparation = Column(Boolean, nullable=True, default=False)
     final_score = Column(Integer, nullable=False, default=0)
     session_metadata = Column(JSON, nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="sessions")
@@ -290,6 +292,8 @@ class DocumentSession(Base):
     preparation_mode = Column(Boolean, nullable=True, default=False)
     skip_preparation = Column(Boolean, nullable=True, default=False)
     analysis_status = Column(String(20), nullable=False, default="pending")
+    retry_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="document_sessions")
@@ -301,6 +305,7 @@ class DocumentSession(Base):
     transcript = relationship("DocumentTranscript", back_populates="session", uselist=False, cascade="all, delete-orphan")
     voice_metrics = relationship("DocumentVoiceMetrics", back_populates="session", uselist=False, cascade="all, delete-orphan")
     face_metrics = relationship("DocumentFaceMetrics", back_populates="session", uselist=False, cascade="all, delete-orphan")
+    recording = relationship("DocumentRecording", back_populates="session", uselist=False, cascade="all, delete-orphan")
 
 class DocumentReport(Base):
     __tablename__ = "document_communication_reports"
@@ -402,3 +407,43 @@ class SessionRecording(Base):
     upload_time = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("Session", back_populates="recording")
+
+
+class DocumentRecording(Base):
+    __tablename__ = "document_recordings"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    recording_id = Column(String(36), unique=True, nullable=True)
+    session_id = Column(String(36), ForeignKey("document_video_sessions.id", ondelete="CASCADE"), unique=True, nullable=False)
+    analysis_id = Column(String(36), nullable=True)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    document_id = Column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+    report_id = Column(String(36), ForeignKey("document_communication_reports.id", ondelete="SET NULL"), nullable=True)
+    recording_path = Column(String(500), nullable=False)
+    recording_url = Column(String(500), nullable=True)
+    recording_duration = Column(Float, nullable=True, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("DocumentSession", back_populates="recording")
+
+
+class BackgroundJob(Base):
+    """
+    Persistent store for async background jobs (e.g., coach recommendations).
+    Replaces the ephemeral in-memory COACH_JOBS dict so jobs survive restarts.
+    """
+    __tablename__ = "background_jobs"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    job_type = Column(String(50), nullable=False, default="coach_recommendations")
+    # Status: pending | processing | completed | failed | expired
+    status = Column(String(20), nullable=False, default="pending")
+    progress = Column(Integer, nullable=False, default=0)
+    message = Column(Text, nullable=True, default="")
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(Text, nullable=True, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

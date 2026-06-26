@@ -213,10 +213,17 @@ async function fetchAPI(endpoint: string, options: RequestInit & { timeout?: num
         lastError = err;
         console.warn(`[API] Attempt ${attempt} failed: ${err.message}`);
 
+        // Never retry 404 — the resource does not exist; retrying wastes time
+        // and causes "Job not found" loops in the coach polling flow.
+        if (err.message && (err.message.includes("404") || err.message === "Job not found.")) {
+          throw err;
+        }
+
         // Do not retry on client errors (4xx) except for timeout/rate limit issues (408, 429)
-        const isClientError = err.message && err.message.startsWith("HTTP ") && 
-          !err.message.includes("500") && !err.message.includes("502") && 
-          !err.message.includes("503") && !err.message.includes("504") && 
+        const isClientError = err.message &&
+          !err.message.startsWith("Cannot reach") &&
+          !err.message.includes("500") && !err.message.includes("502") &&
+          !err.message.includes("503") && !err.message.includes("504") &&
           !err.message.includes("408") && !err.message.includes("429");
 
         if (isClientError) {
@@ -357,16 +364,70 @@ export const api = {
     maxWaitMs = 600000  // 10 minutes
   ): Promise<any> {
     const start = Date.now();
+    console.log(`[POLLING_STARTED] session=${sessionId}`);
+    let consecutiveErrors = 0;
     while (true) {
       const elapsed = Date.now() - start;
       if (elapsed > maxWaitMs) {
+        // Fallback recovery: attempt to load latest completed report
+        try {
+          console.warn(`[POLLING_TIMEOUT] Polling timed out. Attempting fallback recovery...`);
+          const history = await this.getHistory(5);
+          const recovered = history.find((s: any) => s.id === sessionId && s.final_score > 0);
+          if (recovered) {
+            console.info(`[RECOVERY_SUCCESS] Recovered completed session ${sessionId} from history.`);
+            const fullSession = await this.getSession(sessionId);
+            return fullSession;
+          }
+          const anyRecovered = history.find((s: any) => s.final_score > 0);
+          if (anyRecovered) {
+            console.info(`[RECOVERY_SUCCESS] Recovered latest completed session ${anyRecovered.id} from history.`);
+            const fullSession = await this.getSession(anyRecovered.id);
+            return fullSession;
+          }
+        } catch (recErr) {
+          console.error(`[RECOVERY_FAILED] Failed to recover:`, recErr);
+        }
         throw new Error(`Analysis timed out after ${Math.round(maxWaitMs / 1000)}s. Please try again.`);
       }
-      const session = await fetchAPI(`/jam/session/${sessionId}`, { timeout: 15000 });
+
+      let session: any;
+      try {
+        session = await fetchAPI(`/jam/session/${sessionId}`, { timeout: 15000 });
+        consecutiveErrors = 0;
+      } catch (err: any) {
+        consecutiveErrors++;
+        console.warn(`[POLLING] Error fetching session state (consecutive: ${consecutiveErrors}): ${err.message}`);
+        if (consecutiveErrors >= 5) {
+          try {
+            const history = await this.getHistory(5);
+            const recovered = history.find((s: any) => s.id === sessionId && s.final_score > 0);
+            if (recovered) {
+              const fullSession = await this.getSession(sessionId);
+              return fullSession;
+            }
+          } catch (_) {}
+          throw err;
+        }
+        await new Promise(r => setTimeout(r, intervalMs));
+        continue;
+      }
+
       const status: string = session.analysis_status ?? "processing";
+      console.log(`[POLLING_RESPONSE] status=${status} elapsed=${Math.round(elapsed / 1000)}s progress=${session.progress ?? 0}%`);
       onProgress?.(status, elapsed);
-      if (status === "completed") return session;
+      if (status === "completed") {
+        console.log(`[REPORT_RECEIVED] session=${sessionId} score=${session.final_score ?? 0}`);
+        return session;
+      }
       if (status === "failed") {
+        // Attempt report recovery: check if a report was saved despite status=failed
+        if (session.reports && session.reports.length > 0 && session.reports[0].summary) {
+          console.warn(`[POLLING_RESPONSE] Status=failed but report exists. Using saved report.`);
+          session.analysis_status = "completed";
+          return session;
+        }
+        console.error(`[POLLING_RESPONSE] Analysis failed: ${session.message}`);
         throw new Error(session.message || "Analysis failed on the server. Please re-record and try again.");
       }
       await new Promise(r => setTimeout(r, intervalMs));
@@ -384,12 +445,27 @@ export const api = {
     maxWaitMs = 600000
   ): Promise<any> {
     const start = Date.now();
+    let consecutiveErrors = 0;
     while (true) {
       const elapsed = Date.now() - start;
       if (elapsed > maxWaitMs) {
         throw new Error(`Analysis timed out after ${Math.round(maxWaitMs / 1000)}s. Please try again.`);
       }
-      const session = await fetchAPI(`/document/session/${sessionId}`, { timeout: 15000 });
+
+      let session: any;
+      try {
+        session = await fetchAPI(`/document/session/${sessionId}`, { timeout: 15000 });
+        consecutiveErrors = 0;
+      } catch (err: any) {
+        consecutiveErrors++;
+        console.warn(`[POLLING] Document session polling error (consecutive: ${consecutiveErrors}): ${err.message}`);
+        if (consecutiveErrors >= 5) {
+          throw err;
+        }
+        await new Promise(r => setTimeout(r, intervalMs));
+        continue;
+      }
+
       const status: string = session.analysis_status ?? "processing";
       onProgress?.(status, elapsed);
       if (status === "completed") return session;
@@ -403,7 +479,7 @@ export const api = {
   },
 
   async getSessionVideo(sessionId: string): Promise<{ video_url: string }> {
-    return fetchAPI(`/session/${sessionId}/video`);
+    return fetchAPI(`/interviews/${sessionId}/video-info`);
   },
 
   async getHistory(limit?: number) {
@@ -457,7 +533,7 @@ export const api = {
 
   /**
    * Uploads a recorded interview video/audio blob for full evidence-based analysis.
-   * Uses the same pipeline as JAM Analyzer (Whisper + MediaPipe + Gemini).
+   * Uses the same pipeline as JAM Analyzer (Whisper + MediaPipe + Groq).
    * Returns a full SessionOut with 10-section report.
    */
   async uploadInterviewVideo(sessionId: string, videoBlob: Blob, filename = "interview.webm") {
@@ -492,7 +568,28 @@ export const api = {
       if (elapsed > maxWaitMs) {
         throw new Error(`Coaching analysis timed out after ${Math.round(maxWaitMs / 1000)}s.`);
       }
-      const job = await fetchAPI(`/job-status/${jobId}`);
+
+      let job: any;
+      try {
+        job = await fetchAPI(`/job-status/${jobId}`);
+      } catch (err: any) {
+        // If the job no longer exists (404) or backend is down, stop polling immediately.
+        // This prevents infinite error loops when the backend restarts and wipes in-memory jobs.
+        const msg = err.message || "";
+        if (
+          msg === "Job not found." ||
+          msg.includes("404") ||
+          msg.includes("Cannot reach backend")
+        ) {
+          console.warn(`[Coach] Stopping poll — job ${jobId} is unreachable: ${msg}`);
+          throw err;
+        }
+        // Transient network error — wait and retry
+        console.warn(`[Coach] Transient poll error, will retry: ${msg}`);
+        await new Promise(r => setTimeout(r, intervalMs));
+        continue;
+      }
+
       const status: string = job.status ?? "pending";
       const progress: number = job.progress ?? 0;
       const message: string = job.message ?? "";

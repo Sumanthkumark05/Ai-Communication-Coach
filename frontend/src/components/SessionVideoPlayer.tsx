@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
-import { X, Loader2, AlertCircle } from "lucide-react";
+import { X, Loader2, AlertCircle, Download } from "lucide-react";
 import { api } from "../utils/api";
+import SafeVideo from "./common/SafeVideo";
 
 interface SessionVideoPlayerProps {
   sessionId: string;
@@ -32,12 +33,12 @@ export default function SessionVideoPlayer({ sessionId, onClose }: SessionVideoP
             : `${backendRoot}${data.video_url}`;
           setVideoUrl(fullUrl);
         } else {
-          setError("Recording not available for this session.");
+          setError("This presentation recording is unavailable.");
         }
       } catch (err: any) {
         if (!active) return;
         console.error("Failed to load session recording:", err);
-        setError("Recording not available for this session.");
+        setError("This presentation recording is unavailable.");
       } finally {
         if (active) {
           setLoading(false);
@@ -86,22 +87,35 @@ export default function SessionVideoPlayer({ sessionId, onClose }: SessionVideoP
           )}
 
           {videoUrl && (
-            <video
+            <SafeVideo
               ref={videoRef}
               src={videoUrl}
               controls
               autoPlay
               playsInline
               className="w-full h-full object-contain z-10"
-              onError={() => setError("Recording not available for this session.")}
+              videoError={error ?? undefined}
+              onError={() => setError("This presentation recording is unavailable.")}
+              _debugName="SessionVideoPlayer"
             />
           )}
         </div>
 
         {/* Footer */}
         {videoUrl && !error && !loading && (
-          <div className="px-5 py-3 border-t border-slate-800 bg-slate-950 text-[10px] text-slate-500 font-semibold text-center">
-            Use the player controls to play, pause, seek, modify playback rate, or toggle fullscreen.
+          <div className="px-5 py-4 border-t border-slate-800 bg-slate-950 flex flex-col sm:flex-row gap-3 items-center justify-between">
+            <span className="text-[10px] text-slate-500 font-semibold text-center sm:text-left">
+              Use the player controls to play, pause, seek, modify playback rate, or toggle fullscreen.
+            </span>
+            <a
+              href={videoUrl}
+              download={`recording_${sessionId}.webm`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold px-4 py-2 rounded-xl flex items-center gap-1.5 cursor-pointer transition-colors shrink-0"
+            >
+              <Download className="w-3.5 h-3.5" /> Download Recording
+            </a>
           </div>
         )}
       </div>

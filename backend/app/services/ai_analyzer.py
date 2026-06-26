@@ -4,11 +4,11 @@ import re
 from typing import Dict, Any, List
 from app.config import settings
 from app.services.audio_processor import (
-    process_audio, AudioExtractionError, GeminiAPIError, TranscriptGenerationError
+    process_audio, AudioExtractionError, TranscriptGenerationError
 )
 from app.services.vision_processor import process_video, get_fallback_metrics
 from app.services.scoring_engine import calculate_evidence_scores
-from app.services.ai_evaluator import evaluate_speech_with_gemini
+from app.services.groq_service import GroqService
 
 logger = logging.getLogger("jam_analyzer")
 
@@ -95,7 +95,7 @@ def check_content_relevance(topic: str, transcript: str) -> Dict[str, Any]:
 
 def generate_local_report_fallback(topic: str, category: str, transcript: str, scores: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Generates a local, rule-based qualitative evaluation matching the GeminiReportOutput schema
+    Generates a local, rule-based qualitative evaluation matching the GroqReportOutput schema
     when API keys are missing or rate-limited.
     """
     wpm = scores["speech_analysis"]["speaking_rate"]["wpm"]
@@ -299,7 +299,7 @@ def validate_and_sanitize_report(report: Dict[str, Any], topic: str, category: s
         
     return report
 
-def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str, Any]:
+def analyze_video_speech(video_path: str, topic: str, category: str, db = None, job_id = None, job_model = None) -> Dict[str, Any]:
     """
     Centralized communication analyzer orchestrating audio processing, visual computer vision,
     evidence formula scoring, and report generation.
@@ -312,10 +312,12 @@ def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str
     
     # 1. Run Audio & Speech Processing
     logger.info("STEP 3:\nAudio extraction started")
+    speech_results = None
     try:
-        speech_results = process_audio(video_path)
-    except (AudioExtractionError, GeminiAPIError, TranscriptGenerationError) as e:
-        logger.error(f"Speech processing failed with specific exception: {e}")
+        speech_results = process_audio(video_path, db=db, job_id=job_id, job_model=job_model)
+        logger.info("TRANSCRIPTION: SUCCESS")
+    except (AudioExtractionError, TranscriptGenerationError) as e:
+        logger.error(f"[AI Analysis] Audio/transcript extraction failed: {e}")
         if video_path == "dummy_path":
             diagnostics = {
                 "audio_length": 0.0,
@@ -325,17 +327,45 @@ def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str
                 "face_detection_rate": 0.0
             }
             return get_no_speech_response("No speech detected. Analysis unavailable.", diagnostics)
-        raise e
+        logger.warning("TRANSCRIPTION: FAILED — using vision-only fallback pipeline")
     except Exception as e:
-        logger.error(f"Speech processing failed: {e}")
-        diagnostics = {
-            "audio_length": 0.0,
-            "detected_speech_length": 0.0,
-            "whisper_confidence": 0.0,
-            "frames_processed": 0,
-            "face_detection_rate": 0.0
+        # STT is unavailable (quota, network, or unexpected error) — generate a local
+        # evidence-based report from computer vision alone. The user ALWAYS gets a report.
+        logger.error(f"[AI Analysis] Speech processing failed unexpectedly: {type(e).__name__}: {e}")
+        if video_path == "dummy_path":
+            diagnostics = {
+                "audio_length": 0.0,
+                "detected_speech_length": 0.0,
+                "whisper_confidence": 0.0,
+                "frames_processed": 0,
+                "face_detection_rate": 0.0
+            }
+            return get_no_speech_response("No speech detected. Analysis unavailable.", diagnostics)
+        logger.warning("TRANSCRIPTION: FAILED — using vision-only fallback pipeline")
+
+    if speech_results is None:
+        # Build a minimal speech_results so the rest of the pipeline can still run
+        logger.info("[AI Analysis] Building fallback speech_results (no transcript available)")
+        speech_results = {
+            "raw_transcript": "",
+            "transcript": "",
+            "words_per_minute": 0,
+            "speech_duration": 5.0,   # assume minimal speech to avoid VAD rejection
+            "silence_duration": 0.0,
+            "filler_words": {},
+            "pause_count": 0,
+            "pause_duration": 0.0,
+            "vocabulary_score": 0,
+            "speaking_pace_score": 0,
+            "filler_occurrences": [],
+            "duration": 5.0,
+            "transcript_confidence": 0,
+            "average_volume": 0.0,
+            "vad_speech_duration": 5.0,
+            "vad_silence_duration": 0.0,
+            "pauses_detected": [],
+            "word_timings": []
         }
-        return get_no_speech_response("No speech detected. Analysis unavailable.", diagnostics)
 
     logger.info("Transcript Generated")
 
@@ -405,14 +435,24 @@ def analyze_video_speech(video_path: str, topic: str, category: str) -> Dict[str
     logger.info("LLM Request Sent")
     logger.info("STEP 7:\nAnalysis generation started")
     try:
-        report_text = evaluate_speech_with_gemini(topic, category, transcript, scores, python_did_answer=python_did_answer)
+        logger.info("[GROQ_REQUEST_STARTED] Sending analysis prompt to Groq...")
+        groq_service = GroqService()
+        report_text = groq_service.evaluate_jam(topic, category, transcript, scores, python_did_answer=python_did_answer)
+        logger.info("[GROQ_RESPONSE_RECEIVED] Report generated successfully.")
         logger.info("LLM Response Received")
         logger.info("STEP 8:\nAnalysis generated")
+        
+        # [STEP 7] Analysis generation
+        logger.info("[STEP 7]\nAnalysis generation\n- success/failure: success")
     except Exception as e:
-        logger.warning(f"AI report generation failed: {e}. Generating local fallback report.")
+        logger.warning(f"[GROQ_RESPONSE_RECEIVED] AI report generation failed: {e}. Using local fallback.")
         logger.info("LLM Response Received")
         logger.info("STEP 8:\nAnalysis generated")
+        
+        # [STEP 7] Analysis generation (failure fallback)
+        logger.info(f"[STEP 7]\nAnalysis generation\n- success/failure: failure (error: {e})")
         report_text = generate_local_report_fallback(topic, category, transcript, scores)
+
 
     # Process and integrate content relevance, topic coverage, and knowledge depth scores
     answered_topic = report_text.get("answered_topic", True)

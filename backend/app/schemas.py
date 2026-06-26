@@ -186,6 +186,7 @@ class JAMSessionHistoryItem(BaseModel):
     final_score: Optional[int] = 0
     overall_score: Optional[int] = 0
     status: Optional[str] = "completed"
+    has_recording: Optional[bool] = False
 
 class LeaderboardEntry(BaseModel):
     rank: int
@@ -343,6 +344,7 @@ class DocumentSessionOut(BaseModel):
     skip_preparation: Optional[bool] = False
     created_at: datetime
     report: Optional[DocumentReportOut] = None
+    document: Optional[DocumentOut] = None
     gaps: List[KnowledgeGapOut] = []
     transcript: Optional[TranscriptSchema] = None
     voice_metrics: Optional[VoiceMetricsSchema] = None
@@ -363,6 +365,17 @@ class VivaSessionOut(BaseModel):
     questions_answers: Optional[List[Dict[str, Any]]] = []
     overall_score: int
     created_at: datetime
+    document: Optional[DocumentOut] = None
+
+    class Config:
+        from_attributes = True
+
+class DocumentRecordingOut(BaseModel):
+    recording_id: str
+    recording_url: str
+    duration: str
+    analysis_id: str
+    report_id: str
 
     class Config:
         from_attributes = True

@@ -1,14 +1,14 @@
 import os
 import json
 import logging
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session as DBSession
 
 from app.database import get_db
-from app.models import User, Session, DebateSession, SessionRecording
-from app.schemas import SessionOut
+from app.models import User, Session, DebateSession, SessionRecording, Report
+from app.schemas import SessionOut, JAMSessionHistoryItem
 from app.auth import get_current_user
 from app.config import settings
 from app.services.openai_service import OpenAIService
@@ -90,9 +90,16 @@ def start_debate(
         raise
     except Exception as e:
         logger.exception(f"Error starting debate: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.post("/{session_id}/argue")
@@ -430,9 +437,16 @@ def submit_argument(
         raise
     except Exception as e:
         logger.exception(f"Error submitting argument: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.post("/session/{session_id}/upload", response_model=SessionOut)
@@ -447,6 +461,8 @@ async def upload_debate_video(
     in a background thread, and returns the session immediately with processing status.
     """
     import time
+    # [STEP 1] Audio file received
+    logger.info(f"[STEP 1]\nAudio file received\n- filename: {file.filename}\n- size: unknown (streaming)\n- content type: {file.content_type}")
     logger.info("Request Received")
     try:
         session = db.query(Session).filter(
@@ -462,23 +478,29 @@ async def upload_debate_video(
 
         debate = session.debate_session
 
-        # Save uploaded video
+        # Organize recordings by user and generate unique filenames
+        recordings_dir = os.path.join(settings.UPLOAD_DIR, "recordings", f"user_{current_user.id}")
+        os.makedirs(recordings_dir, exist_ok=True)
         file_ext = os.path.splitext(file.filename)[1] or ".webm"
         video_filename = f"debate_{session_id}_{len(debate.scorecard or {})}{file_ext}"
-        video_path = os.path.join(settings.UPLOAD_DIR, video_filename)
+        video_path = os.path.join(recordings_dir, video_filename)
         logger.info(f"[Debate Upload] Received video upload request. Saving video to: '{video_path}'...")
 
         try:
             with open(video_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
+            # Update Step 1 with actual size
+            logger.info(f"[STEP 1] Completed\n- size: {len(content)} bytes")
+            # [STEP 2] Audio saved successfully
+            logger.info(f"[STEP 2]\nAudio saved successfully\n- file path: {video_path}")
             logger.info(f"[Debate Upload] Video saved successfully. Size: {len(content)} bytes.")
         except Exception as e:
             logger.error(f"[Debate Upload] Failed to save debate video: {e}")
             raise HTTPException(status_code=500, detail="Failed to save video.")
 
         # Update session status to processing
-        session.video_url = f"/uploads/{video_filename}"
+        session.video_url = f"/uploads/recordings/user_{current_user.id}/{video_filename}"
         session.analysis_status = "processing"
         
         # Save recording details
@@ -523,7 +545,7 @@ async def upload_debate_video(
                 logger.info("[BG Debate] Stage 1: Extracting audio and generating transcript...")
                 t1 = time.time()
                 try:
-                    speech_results = process_audio(video_path)
+                    speech_results = process_audio(video_path, db=bg_db, job_id=session_id, job_model=Session)
                     transcript_text = speech_results["raw_transcript"]
                     transcript_data = {
                         "raw_transcript": speech_results["raw_transcript"],
@@ -557,7 +579,7 @@ async def upload_debate_video(
                     err_str = str(e).lower()
                     if "no audio" in err_str or "empty" in err_str or "no speech" in err_str or "transcript generation failed" in err_str:
                         error_msg = "No audio detected."
-                    elif "gemini" in err_str or "api key" in err_str or "quota" in err_str or "connection" in err_str or "unavailable" in err_str:
+                    elif "groq" in err_str or "api key" in err_str or "quota" in err_str or "connection" in err_str or "unavailable" in err_str:
                         error_msg = "Transcription service unavailable."
                     
                     # Save error message to SESSION_ERRORS
@@ -892,11 +914,24 @@ async def upload_debate_video(
                 bg_session.final_score = int(d_overall)
                 bg_session.analysis_status = "completed"
                 bg_db.commit()
+                # [STEP 8] Database save
+                logger.info("[STEP 8]\nDatabase save\n- success/failure: success")
                 logger.info(f"[BG Debate] Stage 4 completed in {time.time() - t4:.2f}s")
                 logger.info(f"[BG Debate] Full debate pipeline done in {time.time() - pipeline_start:.2f}s for session {session_id}")
 
             except Exception as exc:
                 logger.error(f"[BG Debate] Analysis pipeline failed for session {session_id}: {exc}", exc_info=True)
+                import traceback
+                print("FULL TRACEBACK:")
+                traceback.print_exc()
+                
+                # [STEP 8] Database save
+                logger.info("[STEP 8]\nDatabase save\n- success/failure: failure")
+                
+                error_msg = f"Error Type: {type(exc).__name__}\nError Message: {str(exc)}\nTraceback:\n{traceback.format_exc()}"
+                from app.routers.jam import SESSION_ERRORS
+                SESSION_ERRORS[session_id] = error_msg
+                
                 try:
                     bg_session = bg_db.query(Session).filter(Session.id == session_id).first()
                     if bg_session:
@@ -914,12 +949,131 @@ async def upload_debate_video(
 
         db.refresh(session)
         logger.info("Response Returned")
+        
+        # [STEP 9] Final API response
+        logger.info(f"[STEP 9]\nFinal API response\n- status: {session.analysis_status}\n- session ID: {session.id}")
         return session
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error in upload_debate_video: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
+
+# Alias and Helper endpoints for Debate Arena
+@router.post("/submit", response_model=SessionOut)
+async def submit_debate_video(
+    session_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    logger.info("[REQUEST_RECEIVED] POST /api/debate/submit session_id=%s", session_id)
+    res = await upload_debate_video(session_id=session_id, file=file, current_user=current_user, db=db)
+    logger.info("[REPORT_RETURNED] session=%s", session_id)
+    return res
+
+@router.post("/analyze", response_model=SessionOut)
+def analyze_debate_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    logger.info("[REQUEST_RECEIVED] POST /api/debate/analyze session_id=%s", session_id)
+    session = db.query(Session).filter(
+        Session.id == session_id,
+        Session.user_id == current_user.id
+    ).first()
+    if not session:
+        logger.info("[JOB_FAILED] session=%s message=Session not found", session_id)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    logger.info("[REPORT_RETURNED] session=%s", session_id)
+    return session
+
+@router.get("/report/{id}")
+def get_debate_report(
+    id: str,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    logger.info("[REQUEST_RECEIVED] GET /api/debate/report/%s", id)
+    report = db.query(Report).filter(Report.id == id).first()
+    if not report:
+        # Fallback to check if id is session_id
+        report = db.query(Report).filter(Report.session_id == id).first()
+    if not report:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
+    # Verify ownership of the parent session
+    session = db.query(Session).filter(
+        Session.id == report.session_id,
+        Session.user_id == current_user.id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this report")
+    logger.info("[REPORT_RETURNED] session=%s report_id=%s", session.id, id)
+    return report.summary
+
+@router.get("/history", response_model=List[JAMSessionHistoryItem])
+def get_debate_history(
+    limit: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    logger.info("[REQUEST_RECEIVED] GET /api/debate/history limit=%s", limit)
+    sessions_query = db.query(Session).filter(
+        Session.user_id == current_user.id,
+        Session.session_type == "debate"
+    ).order_by(Session.created_at.desc())
+    if limit is not None:
+        sessions_query = sessions_query.limit(limit)
+    sessions = sessions_query.all()
+    history_items = []
+    for s in sessions:
+        score = 0
+        if s.analysis_status == "completed":
+            score = getattr(s, "final_score", 0)
+            if score == 0 or score is None:
+                if s.reports and s.reports[0].summary:
+                    score = s.reports[0].summary.get("overall_score", 0)
+                s.final_score = int(score)
+                db.commit()
+        has_recording = False
+        if s.recording and s.recording.video_path and os.path.exists(s.recording.video_path):
+            has_recording = True
+        history_items.append({
+            "id": str(s.id),
+            "topic": str(s.topic) if s.topic else "Untitled Topic",
+            "category": str(s.category) if s.category else "General",
+            "difficulty": str(s.difficulty) if getattr(s, "difficulty", None) else "Medium",
+            "session_type": str(s.session_type),
+            "created_at": s.created_at,
+            "final_score": int(score),
+            "overall_score": int(score),
+            "status": str(s.analysis_status) if s.analysis_status else "completed",
+            "has_recording": has_recording
+        })
+    return history_items
+
+@router.get("/latest", response_model=SessionOut)
+def get_latest_debate(
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    logger.info("[REQUEST_RECEIVED] GET /api/debate/latest")
+    session = db.query(Session).filter(
+        Session.user_id == current_user.id,
+        Session.session_type == "debate"
+    ).order_by(Session.created_at.desc()).first()
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No debate session found")
+    return session
+

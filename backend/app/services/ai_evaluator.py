@@ -7,7 +7,7 @@ from app.config import settings
 
 logger = logging.getLogger("jam_analyzer")
 
-class GeminiReportOutput(BaseModel):
+class GroqReportOutput(BaseModel):
     executive_summary: str = Field(description="Max 5 concise bullet points covering key strengths, major weaknesses, and overall assessment.")
     
     # Speech analysis reasons/suggestions
@@ -28,48 +28,28 @@ class GeminiReportOutput(BaseModel):
     
     speech_confidence_reason: str = Field(description="Reason for speech confidence score.")
     speech_confidence_suggestion: str = Field(description="Actionable suggestion to improve confidence.")
-
-    # Body language evidence/suggestions
-    body_eye_contact_evidence: str = Field(description="Evidence observed for eye contact score.")
-    body_eye_contact_suggestion: str = Field(description="Actionable suggestion to improve eye contact.")
     
-    body_expressions_evidence: str = Field(description="Evidence observed for facial expressions score.")
-    body_expressions_suggestion: str = Field(description="Actionable suggestion to improve facial expressions.")
-    
-    body_posture_evidence: str = Field(description="Evidence observed for posture score.")
-    body_posture_suggestion: str = Field(description="Actionable suggestion to improve posture.")
-    
-    body_gestures_evidence: str = Field(description="Evidence observed for gestures score.")
-    body_gestures_suggestion: str = Field(description="Actionable suggestion to improve hand gestures.")
-    
-    body_head_movement_evidence: str = Field(description="Evidence observed for head movement score.")
-    body_head_movement_suggestion: str = Field(description="Actionable suggestion to improve head stability.")
-
-    # Effectiveness reasons/recommendations
-    effectiveness_confidence_reason: str = Field(description="Reason for confidence score.")
-    effectiveness_confidence_recommendation: str = Field(description="Actionable recommendation for confidence.")
+    # Communication effectiveness reasons/suggestions
+    effectiveness_confidence_reason: str = Field(description="Reason for communication confidence score.")
+    effectiveness_confidence_recommendation: str = Field(description="Actionable recommendation to improve communication confidence.")
     
     effectiveness_professionalism_reason: str = Field(description="Reason for professionalism score.")
-    effectiveness_professionalism_recommendation: str = Field(description="Actionable recommendation for professionalism.")
+    effectiveness_professionalism_recommendation: str = Field(description="Actionable recommendation to improve professionalism.")
     
-    effectiveness_engagement_reason: str = Field(description="Reason for engagement score.")
-    effectiveness_engagement_recommendation: str = Field(description="Actionable recommendation for engagement.")
+    effectiveness_engagement_reason: str = Field(description="Reason for audience engagement score.")
+    effectiveness_engagement_recommendation: str = Field(description="Actionable recommendation to improve audience engagement.")
     
     effectiveness_persuasiveness_reason: str = Field(description="Reason for persuasiveness score.")
-    effectiveness_persuasiveness_recommendation: str = Field(description="Actionable recommendation for persuasiveness.")
+    effectiveness_persuasiveness_recommendation: str = Field(description="Actionable recommendation to improve persuasiveness.")
     
     effectiveness_leadership_reason: str = Field(description="Reason for leadership presence score.")
-    effectiveness_leadership_recommendation: str = Field(description="Actionable recommendation for leadership presence.")
-
-    # Content textual outputs
-    content_grammar_quality: str = Field(description="Grammatical analysis and quality assessment description.")
-    content_vocabulary_richness: str = Field(description="Vocabulary richness and wording assessment description.")
+    effectiveness_leadership_recommendation: str = Field(description="Actionable recommendation to improve leadership presence.")
     
-    # Lists
-    detailed_strengths: List[str] = Field(description="Top 5 evidence-based communication strengths observed.")
-    areas_for_improvement: List[str] = Field(description="Top 5 evidence-based improvement areas.")
+    # Content relevance analysis
+    content_relevance_reason: str = Field(description="Reason for content relevance score.")
+    content_relevance_suggestion: str = Field(description="Actionable suggestion to improve content relevance.")
     
-    # Action Plans
+    # Roadmap actions
     action_immediate: List[str] = Field(description="List of 2-3 immediate action points.")
     action_short_term: List[str] = Field(description="List of 2-3 short-term action points.")
     action_long_term: List[str] = Field(description="List of 2-3 long-term action points.")
@@ -80,46 +60,6 @@ class GeminiReportOutput(BaseModel):
     # never be rewritten, paraphrased, or summarized by the LLM.
     summary: str = Field(description="Concise summary of candidate spoken content.")
     missing_concepts: List[str] = Field(description="List of key technical concepts/definitions missing from candidate response.")
-
-def evaluate_speech_with_groq(prompt: str) -> Dict[str, Any]:
-    """
-    Calls the Groq API to analyze the speech transcript when Gemini is rate-limited.
-    """
-    if not settings.GROQ_API_KEY:
-        raise ValueError("GROQ_API_KEY is not configured.")
-
-    headers = {
-        "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "model": settings.GROQ_MODEL or "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": "You are an elite communication twin mentor. Return your response as a valid JSON object matching the requested fields."},
-            {"role": "user", "content": prompt + "\nOutput your response in clean JSON format."}
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.1
-    }
-    
-    logger.info("Calling Groq API for fallback speech evaluation...")
-    res = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers=headers,
-        json=payload,
-        timeout=25
-    )
-    
-    if res.status_code != 200:
-        raise RuntimeError(f"Groq API returned status code {res.status_code}: {res.text}")
-        
-    res_json = res.json()
-    raw_response = res_json["choices"][0]["message"]["content"]
-    
-    from app.services.topic_generator import extract_and_parse_json
-    parsed_data = extract_and_parse_json(raw_response)
-    return parsed_data
 
 def get_default_report_fallback(topic: str, category: str, transcript: str, scores: Dict[str, Any]) -> Dict[str, Any]:
     wpm = scores["speech_analysis"]["speaking_rate"]["wpm"]
@@ -314,15 +254,15 @@ def is_placeholder_or_generic(val: Any) -> bool:
         return False
     return False
 
-def evaluate_speech_with_gemini(topic: str, category: str, transcript: str,
+def evaluate_speech_with_groq(topic: str, category: str, transcript: str,
                                  scores: Dict[str, Any], python_did_answer: bool = True) -> Dict[str, Any]:
     """
-    Calls Groq's openai/gpt-oss-120b model via the centralized GroqFeedbackService
+    Calls Groq's openai/gpt-oss-120b model via the centralized GroqService
     to generate the professional qualitative report sections.
     """
     logger.info("Summary Generation Started")
-    from app.services.groq_feedback_service import GroqFeedbackService
-    groq_service = GroqFeedbackService()
+    from app.services.groq_service import GroqService
+    groq_service = GroqService()
 
     # Extract all 23 sub-metrics
     overall_score = scores.get("overall_score", 75)

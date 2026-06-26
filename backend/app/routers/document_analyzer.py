@@ -2,18 +2,19 @@ import os
 import shutil
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status, Query, Header
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import get_db
 from app.models import User, Document, DocumentTopic, DocumentSession, DocumentReport, KnowledgeGap, VivaSession, CommunicationDNA, DocumentTranscript, DocumentVoiceMetrics, DocumentFaceMetrics
-from app.schemas import DocumentOut, DocumentSessionOut, DocumentSessionCreate, VivaSessionStart, VivaSessionOut
+from app.schemas import DocumentOut, DocumentSessionOut, DocumentSessionCreate, VivaSessionStart, VivaSessionOut, DocumentRecordingOut
 from app.auth import get_current_user
 from app.config import settings
 from app.services.document_service import DocumentService
 from app.services.ai_analyzer import analyze_video_speech
 from app.services.audio_processor import process_audio
+from app.routers.jam import SESSION_ERRORS
 
 logger = logging.getLogger("jam_analyzer")
 
@@ -141,9 +142,16 @@ async def upload_document(
         raise
     except Exception as e:
         logger.exception(f"Error in upload_document: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.post("/session", response_model=DocumentSessionOut)
@@ -190,9 +198,16 @@ def create_document_session(
         raise
     except Exception as e:
         logger.exception(f"Error in create_document_session: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.post("/session/{session_id}/upload", response_model=DocumentSessionOut)
@@ -203,6 +218,8 @@ async def upload_document_session_video(
     db: DBSession = Depends(get_db)
 ):
     import time
+    # [STEP 1] Audio file received
+    logger.info(f"[STEP 1]\nAudio file received\n- filename: {file.filename}\n- size: unknown (streaming)\n- content type: {file.content_type}")
     logger.info("Request Received")
     logger.info("Recording Received")
     try:
@@ -217,15 +234,21 @@ async def upload_document_session_video(
                 detail="Document session not found."
             )
 
-        # Save video locally
+        # Organize recordings by user and generate unique filenames
+        recordings_dir = os.path.join(settings.UPLOAD_DIR, "recordings", f"user_{current_user.id}")
+        os.makedirs(recordings_dir, exist_ok=True)
         file_ext = os.path.splitext(file.filename)[1] or ".webm"
         video_filename = f"doc_sess_{session_id}{file_ext}"
-        video_path = os.path.join(settings.UPLOAD_DIR, video_filename)
+        video_path = os.path.join(recordings_dir, video_filename)
         logger.info(f"[Document Session Upload] Video upload received. Saving video to: {video_path}...")
         try:
             with open(video_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
+            # Update Step 1 with actual size
+            logger.info(f"[STEP 1] Completed\n- size: {len(content)} bytes")
+            # [STEP 2] Audio saved successfully
+            logger.info(f"[STEP 2]\nAudio saved successfully\n- file path: {video_path}")
             logger.info(f"[Document Session Upload] Saved {len(content):,} bytes.")
         except Exception as e:
             logger.error(f"[Document Session Upload] Failed to save document session video: {e}")
@@ -234,10 +257,32 @@ async def upload_document_session_video(
                 detail=f"Could not save video file: {str(e)}"
             )
 
-        session.video_url = f"/uploads/{video_filename}"
+        session.video_url = f"/uploads/recordings/user_{current_user.id}/{video_filename}"
         session.analysis_status = "processing"
         db.commit()
         db.refresh(session)
+
+        # Check if DocumentRecording exists, if not create one
+        from app.models import DocumentRecording
+        recording = db.query(DocumentRecording).filter(DocumentRecording.session_id == session_id).first()
+        if not recording:
+            recording = DocumentRecording(
+                session_id=session_id,
+                user_id=current_user.id,
+                document_id=session.document_id,
+                recording_path=video_path,
+                recording_url=session.video_url,
+                recording_duration=0.0
+            )
+            db.add(recording)
+            db.commit()
+            db.refresh(recording)
+            recording.recording_id = recording.id
+            recording.analysis_id = session_id
+        else:
+            recording.recording_path = video_path
+            recording.recording_url = session.video_url
+        db.commit()
 
         # Snapshot parameters for the background thread
         topic_title = session.topic_title
@@ -258,13 +303,19 @@ async def upload_document_session_video(
                 pipeline_start = time.time()
                 logger.info(f"[BG Doc Session] Starting analysis pipeline for session {session_id}")
 
-                # Stage 1: Run standard speech analysis (Whisper + MediaPipe + Gemini)
+                # Stage 1: Run standard speech analysis (Whisper + MediaPipe + Groq)
                 t1 = time.time()
                 try:
-                    analysis_result = analyze_video_speech(video_path, topic_title, "Document Presentation")
+                    analysis_result = analyze_video_speech(video_path, topic_title, "Document Presentation", db=bg_db, job_id=session_id, job_model=DocumentSession)
                     logger.info(f"[BG Doc Session] Stage 1 completed in {time.time() - t1:.2f}s")
                 except Exception as e:
                     logger.error(f"A/V speech analysis failed for document session: {e}")
+                    import traceback
+                    print("FULL TRACEBACK:")
+                    traceback.print_exc()
+                    error_msg = f"Error Type: {type(e).__name__}\nError Message: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+                    SESSION_ERRORS[session_id] = error_msg
+                    
                     bg_session.analysis_status = "failed"
                     bg_db.commit()
                     return
@@ -306,6 +357,12 @@ async def upload_document_session_video(
                     logger.info(f"[BG Doc Session] Stage 2 completed in {time.time() - t2:.2f}s")
                 except Exception as e:
                     logger.error(f"Speech to document comparison failed: {e}")
+                    import traceback
+                    print("FULL TRACEBACK:")
+                    traceback.print_exc()
+                    error_msg = f"Error Type: {type(e).__name__}\nError Message: {str(e)}\nTraceback:\n{traceback.format_exc()}"
+                    SESSION_ERRORS[session_id] = error_msg
+                    
                     bg_session.analysis_status = "failed"
                     bg_db.commit()
                     return
@@ -413,12 +470,33 @@ async def upload_document_session_video(
                 dna.explanation_ability = comp_result.get("explanation_quality", 74)
                 dna.communication_confidence = comm_metrics["confidence"]
 
+                # Update recording details
+                from app.models import DocumentRecording
+                recording = bg_db.query(DocumentRecording).filter(DocumentRecording.session_id == session_id).first()
+                if recording:
+                    recording.report_id = db_report.id
+                    audio_length = analysis_result.get("diagnostics", {}).get("audio_length", 0.0)
+                    if audio_length > 0:
+                        recording.recording_duration = float(audio_length)
+
                 bg_session.analysis_status = "completed"
                 bg_db.commit()
+                # [STEP 8] Database save
+                logger.info("[STEP 8]\nDatabase save\n- success/failure: success")
                 logger.info(f"[BG Doc Session] Stage 3 completed in {time.time() - t3:.2f}s")
                 logger.info(f"[BG Doc Session] Full pipeline done in {time.time() - pipeline_start:.2f}s for session {session_id}")
             except Exception as exc:
                 logger.error(f"[BG Doc Session] Analysis pipeline failed for session {session_id}: {exc}", exc_info=True)
+                import traceback
+                print("FULL TRACEBACK:")
+                traceback.print_exc()
+                
+                # [STEP 8] Database save
+                logger.info("[STEP 8]\nDatabase save\n- success/failure: failure")
+                
+                error_msg = f"Error Type: {type(exc).__name__}\nError Message: {str(exc)}\nTraceback:\n{traceback.format_exc()}"
+                SESSION_ERRORS[session_id] = error_msg
+                
                 try:
                     bg_session = bg_db.query(DocumentSession).filter(DocumentSession.id == session_id).first()
                     if bg_session:
@@ -436,14 +514,24 @@ async def upload_document_session_video(
 
         db.refresh(session)
         logger.info("Response Returned")
+        
+        # [STEP 9] Final API response
+        logger.info(f"[STEP 9]\nFinal API response\n- status: {session.analysis_status}\n- session ID: {session.id}")
         return session
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error in upload_document_session_video: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.get("/session/{session_id}", response_model=DocumentSessionOut)
@@ -463,30 +551,56 @@ def get_document_session(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Session not found."
             )
+        # Convert to Pydantic object
+        from app.schemas import DocumentSessionOut
+        session_data = DocumentSessionOut.from_orm(session)
+        
         from datetime import datetime
         elapsed = (datetime.utcnow() - session.created_at).total_seconds()
         if session.analysis_status == "completed":
-            session.status = "completed"
-            session.progress = 100
-            session.message = "Analysis completed."
+            session_data.status = "completed"
+            session_data.progress = 100
+            session_data.message = "Analysis completed."
         elif session.analysis_status == "failed":
-            session.status = "failed"
-            session.progress = 100
-            session.message = "Analysis failed."
+            session_data.status = "failed"
+            session_data.progress = 100
+            session_data.message = SESSION_ERRORS.get(session_id, "Analysis failed.")
         else:
-            session.status = "processing"
-            session.progress = min(90, int(10 + (elapsed / 45.0) * 80.0))
-            session.message = "Analysis is still running."
+            session_data.status = "processing"
+            session_data.progress = min(90, int(10 + (elapsed / 45.0) * 80.0))
+            session_data.message = "Analysis is still running."
+
+        # Dynamically secure the video URL with a stream token
+        if session.video_url:
+            relative_path = session.video_url.replace("/uploads/", "", 1)
+            file_path = os.path.join(settings.UPLOAD_DIR, relative_path)
+            if os.path.exists(file_path):
+                from app.auth import create_access_token
+                from datetime import timedelta
+                stream_token = create_access_token(
+                    data={"sub": current_user.id},
+                    expires_delta=timedelta(minutes=30)
+                )
+                session_data.video_url = f"/api/document-analyzer/{session_id}/recording?token={stream_token}"
+            else:
+                session_data.video_url = None
 
         logger.info("Response Returned")
-        return session
+        return session_data
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error in get_document_session: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.post("/viva/start", response_model=VivaSessionOut)
@@ -537,9 +651,16 @@ def start_viva_session(
         raise
     except Exception as e:
         logger.exception(f"Error in start_viva_session: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.post("/viva/{viva_id}/answer", response_model=VivaSessionOut)
@@ -583,15 +704,22 @@ async def submit_viva_answer(
         # Transcribe speech
         logger.info("Processing Started")
         try:
-            speech_results = process_audio(temp_ans_path)
+            speech_results = process_audio(temp_ans_path, db=db, job_id=None, job_model=None)
             logger.warning(f"Speech results for Viva answer: {speech_results}")
         except Exception as e:
             logger.error(f"Speech enunciation failed: {e}")
             if os.path.exists(temp_ans_path):
                 os.remove(temp_ans_path)
+            import traceback
+            print("FULL TRACEBACK:")
+            traceback.print_exc()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to extract audio or transcribe user speech."
+                detail={
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc()
+                }
             )
 
         answer_transcript = speech_results.get("raw_transcript", "") or speech_results.get("transcript", "")
@@ -658,9 +786,16 @@ async def submit_viva_answer(
         raise
     except Exception as e:
         logger.exception(f"Error in submit_viva_answer: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.get("/viva/{viva_id}", response_model=VivaSessionOut)
@@ -686,7 +821,236 @@ def get_viva_session(
         raise
     except Exception as e:
         logger.exception(f"Error in get_viva_session: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
+
+
+document_analyzer_recording_router = APIRouter(tags=["document-analyzer"])
+
+@document_analyzer_recording_router.get("/document-analyzer/{session_id}/recording")
+def stream_document_recording(
+    session_id: str,
+    token: Optional[str] = None,
+    range: Optional[str] = Header(None),
+    db: DBSession = Depends(get_db)
+):
+    from fastapi.responses import StreamingResponse
+    import mimetypes
+    from jose import jwt
+    
+    # 1. Authenticate user from query parameter
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token is required for streaming."
+        )
+    
+    token_str = token
+    if token_str.startswith('"') and token_str.endswith('"'):
+        token_str = token_str[1:-1]
+    elif token_str.startswith("'") and token_str.endswith("'"):
+        token_str = token_str[1:-1]
+        
+    try:
+        payload = jwt.decode(token_str, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+            )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+        
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+        
+    # 2. Retrieve session
+    session = db.query(DocumentSession).filter(DocumentSession.id == session_id).first()
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+        
+    # 3. Verify ownership
+    if session.user_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this session's video"
+        )
+        
+    # 4. Check if recording file exists
+    if not session.video_url:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No recording associated with this session."
+        )
+        
+    relative_path = session.video_url.replace("/uploads/", "", 1)
+    file_path = os.path.join(settings.UPLOAD_DIR, relative_path)
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recording video file not found."
+        )
+        
+    file_size = os.path.getsize(file_path)
+    
+    # Parse range header
+    start = 0
+    end = file_size - 1
+    
+    if range:
+        try:
+            range_type, range_val = range.strip().split("=")
+            if range_type == "bytes":
+                ranges = range_val.split("-")
+                if ranges[0]:
+                    start = int(ranges[0])
+                if len(ranges) > 1 and ranges[1]:
+                    end = int(ranges[1])
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid Range header format."
+            )
+            
+    if start >= file_size or end >= file_size or start > end:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail=f"Requested range not satisfiable. File size: {file_size}"
+        )
+        
+    chunk_size = end - start + 1
+    
+    def file_iterator():
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            remaining = chunk_size
+            while remaining > 0:
+                chunk = f.read(min(remaining, 1024 * 64))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if not mime_type:
+        mime_type = "video/webm"
+        
+    headers = {
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(chunk_size),
+        "Content-Type": mime_type,
+    }
+    
+    return StreamingResponse(
+        file_iterator(),
+        status_code=206,
+        headers=headers
+    )
+
+
+@router.get("/recording/{recording_id}", response_model=DocumentRecordingOut)
+def get_document_recording(
+    recording_id: str,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    from app.models import DocumentRecording
+    recording = db.query(DocumentRecording).filter(DocumentRecording.id == recording_id).first()
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if recording.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this recording")
+
+    from app.auth import create_access_token
+    from datetime import timedelta
+    stream_token = create_access_token(
+        data={"sub": current_user.id},
+        expires_delta=timedelta(minutes=30)
+    )
+
+    return {
+        "recording_id": str(recording.id),
+        "recording_url": f"/api/document-analyzer/{recording.session_id}/recording?token={stream_token}",
+        "duration": str(recording.recording_duration or 0.0),
+        "analysis_id": str(recording.session_id),
+        "report_id": str(recording.report_id or "")
+    }
+
+@router.get("/report/{report_id}", response_model=DocumentRecordingOut)
+def get_document_report_recording(
+    report_id: str,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    from app.models import DocumentReport, DocumentRecording
+    report = db.query(DocumentReport).filter(DocumentReport.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    session = report.session
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found for report")
+    if session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    recording = db.query(DocumentRecording).filter(DocumentRecording.session_id == session.id).first()
+    if not recording:
+        raise HTTPException(status_code=404, detail="Recording not found for this report")
+
+    from app.auth import create_access_token
+    from datetime import timedelta
+    stream_token = create_access_token(
+        data={"sub": current_user.id},
+        expires_delta=timedelta(minutes=30)
+    )
+
+    return {
+        "recording_id": str(recording.id),
+        "recording_url": f"/api/document-analyzer/{recording.session_id}/recording?token={stream_token}",
+        "duration": str(recording.recording_duration or 0.0),
+        "analysis_id": str(recording.session_id),
+        "report_id": str(recording.report_id or report_id)
+    }
+
+@router.get("/history", response_model=List[DocumentRecordingOut])
+def get_document_history(
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    from app.models import DocumentRecording
+    recordings = db.query(DocumentRecording).filter(DocumentRecording.user_id == current_user.id).all()
+    from app.auth import create_access_token
+    from datetime import timedelta
+    stream_token = create_access_token(
+        data={"sub": current_user.id},
+        expires_delta=timedelta(minutes=30)
+    )
+    res = []
+    for r in recordings:
+        res.append({
+            "recording_id": str(r.id),
+            "recording_url": f"/api/document-analyzer/{r.session_id}/recording?token={stream_token}",
+            "duration": str(r.recording_duration or 0.0),
+            "analysis_id": str(r.session_id),
+            "report_id": str(r.report_id or "")
+        })
+    return res

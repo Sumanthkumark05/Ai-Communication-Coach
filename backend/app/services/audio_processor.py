@@ -15,7 +15,7 @@ logger = logging.getLogger("jam_analyzer")
 class AudioExtractionError(Exception):
     pass
 
-class GeminiAPIError(Exception):
+class GroqAPIError(Exception):
     pass
 
 class TranscriptGenerationError(Exception):
@@ -23,7 +23,7 @@ class TranscriptGenerationError(Exception):
 
 # Mock get_whisper_model to maintain compatibility with main.py startup events
 def get_whisper_model():
-    logger.info("[Startup] Whisper warmup mocked (Gemini API is active).")
+    logger.info("[Startup] Whisper warmup mocked (Groq Whisper API is active).")
     return None
 
 def run_webrtc_vad(audio_path: str, aggressiveness: int = 2) -> Dict[str, Any]:
@@ -453,13 +453,16 @@ def validate_transcript_quality(raw_transcript: str, duration: float, segments_l
         if duration > 2.0:
             logger.warning(f"[Transcript Validation] WARNING: No speech segments were returned by Whisper for audio duration {duration:.2f}s.")
 
-def process_audio(video_path: str) -> Dict[str, Any]:
+def process_audio(video_path: str, db = None, job_id = None, job_model = None) -> Dict[str, Any]:
     """
-    Extracts audio, applies VAD and noise reduction, then runs transcription using Gemini 2.5 Flash verbatim prompt.
+    Extracts audio, applies VAD and noise reduction, then transcribes using Groq Whisper.
+
+    Transcription engine: Groq Whisper (whisper-large-v3) — exclusive, no fallback needed.
+    Retry policy: up to 3 automatic retries with exponential backoff (handled by TranscriptionService).
     """
     import time
     uploaded_filename = os.path.basename(video_path)
-    logger.info(f"--- Audio Processing (Gemini STT) for file: {uploaded_filename} ---")
+    logger.info(f"--- Audio Processing (Groq Whisper: whisper-large-v3) for file: {uploaded_filename} ---")
     audio_path = None
     try:
         audio_path = extract_audio(video_path)
@@ -467,73 +470,37 @@ def process_audio(video_path: str) -> Dict[str, Any]:
         # 1. Run WebRTC VAD
         vad_results = run_webrtc_vad(audio_path, aggressiveness=2)
         
-        # 2. Setup Gemini client
-        from google import genai
-        from google.genai import types
-        
-        if not settings.GEMINI_API_KEY:
-            raise GeminiAPIError("Gemini API failed")
-            
-        try:
-            client = genai.Client(api_key=settings.GEMINI_API_KEY)
-            logger.info(f"[Gemini STT] Uploading audio file '{audio_path}' to Gemini...")
-            audio_file = client.files.upload(file=audio_path)
-            logger.info(f"[Gemini STT] File uploaded. Remote name: {audio_file.name}")
-        except Exception as e:
-            logger.error(f"[Gemini STT] File upload failed: {e}")
-            raise GeminiAPIError("Gemini API failed") from e
-        
-        transcription_prompt = """Transcribe this audio verbatim.
+        # 2. Validate audio file exists and has content
+        if not os.path.exists(audio_path):
+            raise AudioExtractionError(f"Audio file does not exist: {audio_path}")
 
-Return exactly what is spoken.
+        audio_size = os.path.getsize(audio_path)
+        logger.info(f"[STT] Audio file verification: path={audio_path}, size={audio_size} bytes")
+        if audio_size == 0:
+            raise AudioExtractionError("Audio file is empty (0 bytes).")
 
-Do not summarize.
-
-Do not paraphrase.
-
-Do not improve grammar.
-
-Do not remove filler words.
-
-Do not correct pronunciation.
-
-Do not rewrite sentences.
-
-Preserve pauses, hesitations, repetitions, and speech disfluencies.
-
-Output only the raw transcript."""
-        
+        # 3. Transcribe using Groq Whisper (whisper-large-v3) exclusively
+        from app.services.transcription_service import TranscriptionService
         try:
             logger.info("STEP 5:\nTranscript generation started")
-            logger.info("[Gemini STT] Generating transcription...")
-            transcribe_start = time.time()
-            
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[
-                    audio_file,
-                    transcription_prompt
-                ]
-            )
-            
-            transcribe_duration = time.time() - transcribe_start
-            logger.info(f"[Gemini STT] Transcription completed in {transcribe_duration:.2f}s")
+            logger.info("[STEP 5]\nGroq Whisper STT\n- model: whisper-large-v3 | retries: up to 3 | format: verbose_json")
+
+            transcription_service = TranscriptionService()
+            raw_transcript = transcription_service.transcribe(audio_path)
+            logger.info("[GROQ_STT_COMPLETE] Transcription received successfully.")
         except Exception as e:
-            logger.error(f"[Gemini STT] generate_content failed: {e}")
-            raise GeminiAPIError("Gemini API failed") from e
-            
-        # Delete remote file immediately to keep storage clean
-        try:
-            client.files.delete(name=audio_file.name)
-            logger.info("[Gemini STT] Remote file deleted successfully from Gemini storage.")
-        except Exception as delete_exc:
-            logger.warning(f"[Gemini STT] Failed to delete remote file: {delete_exc}")
-            
-        raw_transcript = response.text or ""
-        logger.info(f"[Gemini STT] Raw transcript length: {len(raw_transcript)} chars")
-        
+            logger.error(f"[STT_FAILURE] Unexpected error during transcription: {type(e).__name__}: {e}")
+            raise RuntimeError(f"Transcription failed: {str(e)}") from e
+
+        logger.info(f"[STEP 6]\nTranscription response\n- response received: success\n- response size: {len(raw_transcript)} characters")
+        logger.info(f"[STEP 4]\nTranscription\n- transcript length: {len(raw_transcript)} characters")
+        logger.info(f"[STT] Raw transcript length: {len(raw_transcript)} chars")
+
         if not raw_transcript.strip():
+            logger.warning("[STT_FAILURE] Transcript is empty after successful API call — likely silent audio.")
             raise TranscriptGenerationError("Transcript generation failed")
+
+        logger.info(f"[STT_RESPONSE_PARSED] transcript_length={len(raw_transcript)} preview='{raw_transcript[:80].strip()}'")
         logger.info("STEP 6:\nTranscript generated")
         
         # 3. Calculate metrics locally
@@ -569,7 +536,7 @@ Output only the raw transcript."""
         # Estimate pause metrics based on silence duration from VAD
         pause_duration = round(silence_dur, 2)
         pauses_count = int(silence_dur / 2.0)
-        avg_confidence = 98 # high default for Gemini's verified accuracy
+        avg_confidence = 98  # high default confidence for verified transcription
         
         metrics = {
             "raw_transcript": raw_transcript,
@@ -599,6 +566,9 @@ Output only the raw transcript."""
         
     except Exception as e:
         logger.error(f"Error processing speech: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise e
     finally:
         if audio_path and os.path.exists(audio_path):

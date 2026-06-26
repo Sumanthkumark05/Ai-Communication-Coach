@@ -25,7 +25,7 @@ from app.services.vision_processor import process_video
 from app.services.openai_service import OpenAIService
 from app.services.coach_agent import CoachAgent
 from app.services.audio_processor import (
-    extract_audio, AudioExtractionError, GeminiAPIError, TranscriptGenerationError, process_audio
+    extract_audio, AudioExtractionError, TranscriptGenerationError, process_audio
 )
 from app.services.topic_generator import generate_topic_from_llm
 from app.services.ai_analyzer import analyze_video_speech, AnalysisParsingError
@@ -33,10 +33,14 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger("jam_analyzer")
 
-SESSION_ERRORS = {}
-
 router = APIRouter(prefix="/jam", tags=["jam"])
 api_router = APIRouter(tags=["jam"])
+
+# Process-local cache mapping session_id -> error message string.
+# Used by jam, debate, and document_analyzer routers for debug logging.
+# NOTE: This is NOT a job store — it holds error strings only and is cleared on restart.
+SESSION_ERRORS: dict = {}
+
 
 # Helper to get user from token for WebSocket
 def get_websocket_user_sync(token: str) -> Optional[User]:
@@ -405,6 +409,7 @@ def create_session(
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db)
 ):
+    logger.info("[REQUEST_RECEIVED] Create Session")
     session = Session(
         user_id=current_user.id,
         session_type="jam",
@@ -418,6 +423,7 @@ def create_session(
     db.add(session)
     db.commit()
     db.refresh(session)
+    logger.info("[JOB_CREATED] session=%s", session.id)
     return session
 
 @router.post("/session/{session_id}/upload", response_model=SessionOut)
@@ -427,8 +433,11 @@ async def upload_video(
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db)
 ):
+    # [STEP 1] Audio file received
+    logger.info(f"[VIDEO_RECEIVED] filename={file.filename} content_type={file.content_type}")
+    logger.info(f"[STEP 1]\nAudio file received\n- filename: {file.filename}\n- size: unknown (streaming)\n- content type: {file.content_type}")
     logger.info("STEP 1:\nMedia upload received")
-    logger.info("Request Received")
+    logger.info("[REQUEST_RECEIVED] Upload Video for session %s", session_id)
     logger.info("Recording Received")
     try:
         session = db.query(Session).filter(
@@ -442,10 +451,12 @@ async def upload_video(
                 detail="Session not found"
             )
             
-        # Check file extension
+        # Organize recordings by user and generate unique filenames
+        recordings_dir = os.path.join(settings.UPLOAD_DIR, "recordings", f"user_{current_user.id}")
+        os.makedirs(recordings_dir, exist_ok=True)
         file_ext = os.path.splitext(file.filename)[1] or ".webm"
-        video_filename = f"{session_id}{file_ext}"
-        video_path = os.path.join(settings.UPLOAD_DIR, video_filename)
+        video_filename = f"session_{session_id}{file_ext}"
+        video_path = os.path.join(recordings_dir, video_filename)
         logger.info(f"[JAM Upload] Video upload received. Saving video to: {video_path}...")
         
         # Save file locally
@@ -453,6 +464,11 @@ async def upload_video(
             with open(video_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
+            # Update Step 1 with actual size
+            logger.info(f"[STEP 1] Completed\n- size: {len(content)} bytes")
+            # [STEP 2] Audio saved successfully
+            logger.info(f"[FILE_SAVED] path={video_path} size={len(content)} bytes")
+            logger.info(f"[STEP 2]\nAudio saved successfully\n- file path: {video_path}")
             logger.info(f"[JAM Upload] Video saved successfully. Size: {len(content)} bytes.")
             logger.info("STEP 2:\nVideo saved successfully")
         except Exception as e:
@@ -462,7 +478,7 @@ async def upload_video(
                 detail=f"Failed to save uploaded video: {str(e)}"
             )
             
-        session.video_url = f"/uploads/{video_filename}"
+        session.video_url = f"/uploads/recordings/user_{current_user.id}/{video_filename}"
         session.analysis_status = "processing"
         
         # Save recording details
@@ -499,17 +515,21 @@ async def upload_video(
 
                 pipeline_start = time.time()
                 logger.info(f"[BG] Starting analysis pipeline for session {session_id}")
+                logger.info("[JOB_STARTED] session=%s", session_id)
 
-                # Stage 1: Full AI analysis (Whisper + MediaPipe + Gemini)
+                # Stage 1: Full AI analysis (Whisper + MediaPipe + Groq)
                 t1 = time.time()
+                logger.info("[AUDIO_EXTRACTION_STARTED] Running full analyze_video_speech pipeline...")
                 logger.info("[BG] Stage 1: Running analyze_video_speech...")
-                report_data = analyze_video_speech(video_path, topic, category)
+                report_data = analyze_video_speech(video_path, topic, category, db=bg_db, job_id=session_id, job_model=Session)
+                logger.info(f"[AUDIO_EXTRACTION_COMPLETE] pipeline finished in {time.time() - t1:.2f}s status={report_data.get('status', 'unknown')}")
                 logger.info(f"[BG] Stage 1 completed in {time.time() - t1:.2f}s")
 
                 if report_data.get("status") == "NO_SPEECH_DETECTED":
                     bg_session.analysis_status = "failed"
                     SESSION_ERRORS[session_id] = "Transcript generation failed"
                     bg_db.commit()
+                    logger.info("[JOB_FAILED] session=%s message=No speech detected", session_id)
                     logger.warning(f"[BG] No speech detected for session {session_id}. Marked as failed.")
                     return
 
@@ -597,37 +617,39 @@ async def upload_video(
                     bg_session.final_score = int(report_data.get("overall_score", 0))
                     bg_session.analysis_status = "completed"
                     bg_db.commit()
+                    logger.info("[REPORT_GENERATED] overall_score=%s session=%s", report_data.get('overall_score', 0), session_id)
+                    logger.info("[REPORT_SAVED] DB committed successfully for session %s", session_id)
+                    logger.info("[JOB_COMPLETED] session=%s final_score=%s", session_id, int(report_data.get('overall_score', 0)))
                     logger.info("STEP 10:\nDatabase save completed")
                     logger.info("Database Updated")
+                    # [STEP 8] Database save
+                    logger.info("[STEP 8]\nDatabase save\n- success/failure: success")
                     logger.info(f"[BG] Stage 2 completed in {time.time() - t2:.2f}s")
                     logger.info(f"[BG] Full pipeline done in {time.time() - pipeline_start:.2f}s for session {session_id}")
                 except SQLAlchemyError as db_exc:
                     logger.error(f"[BG] Database save failed: {db_exc}", exc_info=True)
+                    # [STEP 8] Database save
+                    logger.info("[STEP 8]\nDatabase save\n- success/failure: failure")
                     bg_db.rollback()
                     raise db_exc
 
             except Exception as exc:
                 logger.error(f"[BG] Analysis pipeline failed for session {session_id}: {exc}", exc_info=True)
+                logger.info("[JOB_FAILED] session=%s message=%s", session_id, str(exc))
+                import traceback
+                print("FULL TRACEBACK:")
+                traceback.print_exc()
                 
                 # Check exception type to map it to correct detailed error message
-                error_msg = "Analysis failed on server"
-                if isinstance(exc, AudioExtractionError):
-                    error_msg = "Audio extraction failed"
-                elif isinstance(exc, GeminiAPIError):
-                    error_msg = "Gemini API failed"
-                elif isinstance(exc, TranscriptGenerationError):
-                    error_msg = "Transcript generation failed"
-                elif isinstance(exc, AnalysisParsingError):
-                    error_msg = "Analysis parsing failed"
-                elif isinstance(exc, SQLAlchemyError):
-                    error_msg = "Database save failed"
-                    
+                error_msg = f"Error Type: {type(exc).__name__}\nError Message: {str(exc)}\nTraceback:\n{traceback.format_exc()}"
                 SESSION_ERRORS[session_id] = error_msg
                 
                 try:
                     bg_session = bg_db.query(Session).filter(Session.id == session_id).first()
                     if bg_session:
                         bg_session.analysis_status = "failed"
+                        if hasattr(bg_session, "last_error"):
+                            bg_session.last_error = str(exc)
                         bg_db.commit()
                 except Exception:
                     pass
@@ -636,19 +658,30 @@ async def upload_video(
 
         thread = threading.Thread(target=run_analysis_background, daemon=True)
         thread.start()
+        logger.info(f"[JOB_CREATED] session={session_id} topic='{topic}' video={video_path}")
         logger.info(f"[JAM Upload] Analysis background job started for session {session_id}. Returning session immediately.")
 
         db.refresh(session)
         logger.info("STEP 11:\nResponse returned")
         logger.info("Response Returned")
+        
+        # [STEP 9] Final API response
+        logger.info(f"[STEP 9]\nFinal API response\n- status: {session.analysis_status}\n- session ID: {session.id}")
         return session
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error in upload_video: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.get("/session/{session_id}", response_model=SessionOut)
@@ -657,7 +690,7 @@ def get_session(
     current_user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db)
 ):
-    logger.info("Request Received")
+    logger.info("[REQUEST_RECEIVED] Get Session session_id=%s", session_id)
     try:
         session = db.query(Session).filter(
             Session.id == session_id,
@@ -688,7 +721,7 @@ def get_session(
         elif session.analysis_status == "failed":
             session.status = "failed"
             session.progress = 100
-            session.message = SESSION_ERRORS.get(session_id, "Analysis failed.")
+            session.message = SESSION_ERRORS.get(session_id) or getattr(session, "last_error", None) or "Analysis failed."
         else:
             session.status = "processing"
             session.progress = min(90, int(10 + (elapsed / 45.0) * 80.0))
@@ -697,15 +730,23 @@ def get_session(
         _api_raw_t = session.transcript.raw_transcript if session.transcript else ""
         logger.info("Transcript Returned")
         logger.info(f"Transcript length: {len(_api_raw_t)} chars")
+        logger.info("[REPORT_RETURNED] session=%s", session_id)
         logger.info("Response Returned")
         return session
     except HTTPException:
         raise
     except Exception as e:
         logger.exception(f"Error in get_session: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @api_router.get("/session/{session_id}/video")
@@ -828,6 +869,11 @@ def get_history(
                         s.final_score = int(score)
                         db.commit()
                 
+                # Check if recording file exists on disk
+                has_recording = False
+                if s.recording and s.recording.video_path and os.path.exists(s.recording.video_path):
+                    has_recording = True
+                
                 history_items.append({
                     "id": str(s.id),
                     "topic": str(s.topic) if s.topic else "Untitled Topic",
@@ -837,7 +883,8 @@ def get_history(
                     "created_at": s.created_at,
                     "final_score": int(score),
                     "overall_score": int(score),
-                    "status": str(s.analysis_status) if s.analysis_status else "completed"
+                    "status": str(s.analysis_status) if s.analysis_status else "completed",
+                    "has_recording": has_recording
                 })
             except Exception as e:
                 logger.warning(f"Error processing standard session {getattr(s, 'id', 'unknown')}: {e}")
@@ -849,6 +896,13 @@ def get_history(
                 score = 0
                 if s.report:
                     score = int((s.report.accuracy_score + s.report.coverage_score + s.report.understanding_score + s.report.explanation_quality + s.report.technical_correctness + s.report.relevance_score) / 6)
+                has_recording = False
+                if s.video_url:
+                    relative_path = s.video_url.replace("/uploads/", "", 1)
+                    file_path = os.path.join(settings.UPLOAD_DIR, relative_path)
+                    if os.path.exists(file_path):
+                        has_recording = True
+
                 history_items.append({
                     "id": str(s.id),
                     "topic": str(s.topic_title) if s.topic_title else "Untitled Document Session",
@@ -857,7 +911,8 @@ def get_history(
                     "created_at": s.created_at,
                     "final_score": int(score),
                     "overall_score": int(score),
-                    "status": "completed" if s.report else "processing"
+                    "status": "completed" if s.report else "processing",
+                    "has_recording": has_recording
                 })
             except Exception as e:
                 logger.warning(f"Error processing document session {getattr(s, 'id', 'unknown')}: {e}")
@@ -874,7 +929,8 @@ def get_history(
                     "created_at": s.created_at,
                     "final_score": int(s.overall_score) if s.overall_score is not None else 0,
                     "overall_score": int(s.overall_score) if s.overall_score is not None else 0,
-                    "status": "completed"
+                    "status": "completed",
+                    "has_recording": False
                 })
             except Exception as e:
                 logger.warning(f"Error processing viva session {getattr(s, 'id', 'unknown')}: {e}")
@@ -897,10 +953,15 @@ def get_history(
     except Exception as e:
         import traceback
         logger.exception("JAM History Error")
-        print(traceback.format_exc())
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @router.get("/leaderboard", response_model=List[LeaderboardEntry])
@@ -1164,7 +1225,61 @@ def get_analytics(
         raise
     except Exception as e:
         logger.exception(f"Error in get_analytics: {e}")
+        import traceback
+        print("FULL TRACEBACK:")
+        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal analysis generation or display error. Please try again."
+            detail={
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
+
+# Alias routes to support the endpoints mentioned in Step 5
+@router.post("/upload", response_model=SessionOut)
+async def upload_video_alias(
+    session_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    logger.info("[REQUEST_RECEIVED] POST /api/jam/upload session_id=%s", session_id)
+    res = await upload_video(session_id=session_id, file=file, current_user=current_user, db=db)
+    logger.info("[REPORT_RETURNED] session=%s", session_id)
+    return res
+
+@router.post("/analyze", response_model=SessionOut)
+def analyze_session_alias(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    logger.info("[REQUEST_RECEIVED] POST /api/jam/analyze session_id=%s", session_id)
+    session = db.query(Session).filter(
+        Session.id == session_id,
+        Session.user_id == current_user.id
+    ).first()
+    if not session:
+        logger.info("[JOB_FAILED] session=%s message=Session not found", session_id)
+        raise HTTPException(status_code=404, detail="Session not found")
+    logger.info("[REPORT_RETURNED] session=%s", session_id)
+    return session
+
+@router.get("/report/{report_id}")
+def get_report_by_id_alias(
+    report_id: str,
+    current_user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db)
+):
+    logger.info("[REQUEST_RECEIVED] GET /api/jam/report/%s", report_id)
+    report = db.query(Report).filter(Report.id == report_id).first()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    # Verify ownership of the parent session
+    session = db.query(Session).filter(Session.id == report.session_id).first()
+    if not session or session.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this report")
+    logger.info("[REPORT_RETURNED] session=%s report_id=%s", session.id, report_id)
+    return report.summary

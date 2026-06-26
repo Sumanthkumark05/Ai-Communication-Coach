@@ -8,7 +8,7 @@ import {
   AlertTriangle, ArrowRight, CheckCircle, RefreshCw, Calendar, 
   Volume2, Shield, User, Trophy, BarChart3, Clock, TrendingUp, 
   Play, Square, VideoOff, Camera, UserCheck, Flame, ChevronRight,
-  TrendingDown, Check, Info, FileDown, BookOpen, ShieldAlert, Activity, FileText,
+  TrendingDown, Check, Info, FileDown, Download, BookOpen, ShieldAlert, Activity, FileText,
   Search, ArrowLeft, Filter
 } from "lucide-react";
 import {
@@ -31,6 +31,7 @@ import { api } from "../utils/api";
 import Sidebar from "../components/Sidebar";
 import SessionVideoPlayer from "../components/SessionVideoPlayer";
 import BackButton from "../components/BackButton";
+import SafeVideo from "../components/common/SafeVideo";
 
 ChartJS.register(
   RadialLinearScale,
@@ -84,6 +85,10 @@ export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [user, setUser] = useState<any>(null);
   const [activeResultTab, setActiveResultTab] = useState("overview");
+  // Transcript panel state
+  const [transcriptSearch, setTranscriptSearch] = useState("");
+  const [transcriptExpanded, setTranscriptExpanded] = useState(true);
+  const [transcriptCopied, setTranscriptCopied] = useState(false);
   
   // View All Sessions Search & Filter States
   const [sessionsSearch, setSessionsSearch] = useState("");
@@ -234,6 +239,25 @@ export default function Home() {
   const [vivaModeOption, setVivaModeOption] = useState<"viva" | "project" | "resume">("viva");
   const [activeDocSession, setActiveDocSession] = useState<any>(null);
   const [docSessionLoading, setDocSessionLoading] = useState(false);
+  const [docSessionVideoUrl, setDocSessionVideoUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (activeDocSession?.id) {
+      api.getSessionVideo(activeDocSession.id)
+        .then((data) => {
+          if (data && data.video_url) {
+            const backendRoot = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+            const fullUrl = data.video_url.startsWith("http") ? data.video_url : `${backendRoot}${data.video_url}`;
+            setDocSessionVideoUrl(fullUrl);
+          } else {
+            setDocSessionVideoUrl(null);
+          }
+        })
+        .catch(() => setDocSessionVideoUrl(null));
+    } else {
+      setDocSessionVideoUrl(null);
+    }
+  }, [activeDocSession]);
   
   // Document Viva state variables
   const [activeVivaSession, setActiveVivaSession] = useState<any>(null);
@@ -591,18 +615,107 @@ export default function Home() {
     setCurrentScreen(screen);
   };
 
+  // Save state to localStorage to persist across refreshes
+  useEffect(() => {
+    if (typeof window !== "undefined" && user) {
+      localStorage.setItem("twinai_current_screen", currentScreen);
+      
+      if (activeSession?.id) {
+        localStorage.setItem("twinai_active_session_id", activeSession.id);
+      } else {
+        localStorage.removeItem("twinai_active_session_id");
+      }
+
+      if (activeDocSession?.id) {
+        localStorage.setItem("twinai_active_doc_session_id", activeDocSession.id);
+      } else {
+        localStorage.removeItem("twinai_active_doc_session_id");
+      }
+
+      if (activeVivaSession?.id) {
+        localStorage.setItem("twinai_active_viva_session_id", activeVivaSession.id);
+      } else {
+        localStorage.removeItem("twinai_active_viva_session_id");
+      }
+
+      if (debateSessionId) {
+        localStorage.setItem("twinai_debate_session_id", debateSessionId);
+        localStorage.setItem("twinai_debate_topic", debateTopic);
+        localStorage.setItem("twinai_debate_difficulty", debateDifficulty);
+        localStorage.setItem("twinai_debate_opponent_arg", debateOpponentArg);
+        localStorage.setItem("twinai_debate_user_arg", debateUserArg);
+        if (debateScorecard) {
+          localStorage.setItem("twinai_debate_scorecard", JSON.stringify(debateScorecard));
+        } else {
+          localStorage.removeItem("twinai_debate_scorecard");
+        }
+      } else {
+        localStorage.removeItem("twinai_debate_session_id");
+        localStorage.removeItem("twinai_debate_topic");
+        localStorage.removeItem("twinai_debate_difficulty");
+        localStorage.removeItem("twinai_debate_opponent_arg");
+        localStorage.removeItem("twinai_debate_user_arg");
+        localStorage.removeItem("twinai_debate_scorecard");
+      }
+    }
+  }, [currentScreen, activeSession, activeDocSession, activeVivaSession, debateSessionId, debateTopic, debateDifficulty, debateOpponentArg, debateUserArg, debateScorecard, user]);
+
   const loadUserProfile = async () => {
     try {
       const profile = await api.getMe();
       setUser(profile);
       fetchDashboardData();
-      fetchCoachData();
       
       let initialScreen: Screen = "dashboard";
-      if (typeof window !== "undefined") {
+      let sessionToLoad = localStorage.getItem("twinai_active_session_id");
+      let docSessionToLoad = localStorage.getItem("twinai_active_doc_session_id");
+      let vivaSessionToLoad = localStorage.getItem("twinai_active_viva_session_id");
+      let debSessId = localStorage.getItem("twinai_debate_session_id");
+
+      if (debSessId) {
+        setDebateSessionId(debSessId);
+        setDebateTopic(localStorage.getItem("twinai_debate_topic") || "");
+        setDebateDifficulty(localStorage.getItem("twinai_debate_difficulty") || "Intermediate");
+        setDebateOpponentArg(localStorage.getItem("twinai_debate_opponent_arg") || "");
+        setDebateUserArg(localStorage.getItem("twinai_debate_user_arg") || "");
+        const card = localStorage.getItem("twinai_debate_scorecard");
+        if (card) setDebateScorecard(JSON.parse(card));
+      }
+
+      if (sessionToLoad) {
+        try {
+          const s = await api.getSession(sessionToLoad);
+          setActiveSession(s);
+        } catch (e) {
+          console.error("Failed to recover active session:", e);
+        }
+      }
+
+      if (docSessionToLoad) {
+        try {
+          const ds = await api.getDocSession(docSessionToLoad);
+          setActiveDocSession(ds);
+        } catch (e) {
+          console.error("Failed to recover active doc session:", e);
+        }
+      }
+
+      if (vivaSessionToLoad) {
+        try {
+          const vs = await api.getVivaSession(vivaSessionToLoad);
+          setActiveVivaSession(vs);
+        } catch (e) {
+          console.error("Failed to recover active viva session:", e);
+        }
+      }
+
+      const savedScreen = localStorage.getItem("twinai_current_screen") as Screen;
+      const validScreens: Screen[] = ["dashboard", "jam", "debate", "interview", "dna", "coach", "history", "doc_analyzer", "sessions", "results", "doc_results", "doc_viva"];
+      if (savedScreen && validScreens.includes(savedScreen)) {
+        initialScreen = savedScreen;
+      } else if (typeof window !== "undefined") {
         const path = window.location.pathname;
         const cleanPath = path.replace(/^\//, "") as Screen;
-        const validScreens: Screen[] = ["dashboard", "jam", "debate", "interview", "dna", "coach", "history", "doc_analyzer", "sessions"];
         if (validScreens.includes(cleanPath)) {
           initialScreen = cleanPath;
         }
@@ -727,6 +840,7 @@ export default function Home() {
 
   const uploadJamSessionVideo = async (blob: Blob) => {
     try {
+      console.log(`[VIDEO_RECORDING_COMPLETE] size=${blob.size} bytes type=${blob.type}`);
       let sessionId = currentSessionIdRef.current;
       if (!sessionId) {
         const session = await api.createSession(
@@ -740,8 +854,11 @@ export default function Home() {
         sessionId = session.id;
       }
       
+      console.log(`[JOB_CREATED] session=${sessionId} topic="${generatedTopic}"`);
+      console.log(`[VIDEO_UPLOAD_STARTED] session=${sessionId} size=${blob.size} bytes`);
       // Upload video — returns quickly now (background analysis job is queued)
       await api.uploadVideo(sessionId as string, blob);
+      console.log(`[VIDEO_UPLOAD_SUCCESS] session=${sessionId}`);
 
       // Show processing screen while we poll
       setProcessingMessage("Initializing video upload and queuing AI analysis...");
@@ -760,7 +877,7 @@ export default function Home() {
       // Transcript logging
       const _rt = completedSession?.transcript?.raw_transcript || "";
       const _ct = completedSession?.transcript?.corrected_transcript || "";
-      console.log("Transcript Retrieved");
+      console.log("[REPORT_RECEIVED] Analysis complete.");
       console.log(`Transcript Returned To Frontend | raw_transcript length=${_rt.length} | corrected_transcript length=${_ct.length}`);
       console.log(`Transcript Preview (first 100 chars): "${_rt.slice(0, 100)}"`);
       fetchDashboardData();
@@ -772,6 +889,7 @@ export default function Home() {
       setCurrentScreen("jam");
     }
   };
+
 
   const uploadDebateSessionVideo = async (blob: Blob) => {
     setDebateLoading(true);
@@ -809,7 +927,7 @@ export default function Home() {
       let errorMsg = "Audio upload failed.";
       const errorString = String(e.message || e).toLowerCase();
       
-      if (errorString.includes("transcription") || errorString.includes("gemini") || errorString.includes("whisper") || errorString.includes("unavailable")) {
+      if (errorString.includes("transcription") || errorString.includes("groq") || errorString.includes("whisper") || errorString.includes("unavailable")) {
         errorMsg = "Transcription service unavailable.";
       } else if (errorString.includes("no audio") || errorString.includes("empty audio") || errorString.includes("no speech")) {
         errorMsg = "No audio detected.";
@@ -1791,43 +1909,44 @@ export default function Home() {
     }
   };
 
-  const handleDownloadPDF = () => {
-    if (!activeSession) return;
+  const handleDownloadPDF = (sessionObj?: any) => {
+    const session = sessionObj || activeSession;
+    if (!session) return;
     const doc = new jsPDF();
     
     // Fetch or construct report object mirroring the Results view fallback
-    const dbReport = activeSession.reports?.[0]?.summary;
+    const dbReport = session.reports?.[0]?.summary;
     const defaultReport = {
-      final_score: activeSession.final_score || 0,
-      overall_score: activeSession.final_score || 0,
-      rating: activeSession.dna?.profile_summary || "Good",
+      final_score: session.final_score || 0,
+      overall_score: session.final_score || 0,
+      rating: session.dna?.profile_summary || "Good",
       executive_summary: "- Key strengths: Good pacing and posture.\n- Major weaknesses: Focus on reducing filler words.\n- Overall assessment: solid speech delivery with potential to improve.",
       speech_analysis: {
-        speaking_rate: { score: activeSession.dna?.speaking_speed || 70, reason: "Speed was consistent.", suggestion: "Practice speed-reading drills." },
-        clarity: { score: activeSession.dna?.clarity || 70, reason: "Pronunciation was clear.", suggestion: "Maintain distance from microphone." },
+        speaking_rate: { score: session.dna?.speaking_speed || 70, reason: "Speed was consistent.", suggestion: "Practice speed-reading drills." },
+        clarity: { score: session.dna?.clarity || 70, reason: "Pronunciation was clear.", suggestion: "Maintain distance from microphone." },
         pronunciation: { score: 75, reason: "Words were enounced correctly.", suggestion: "Practice multi-syllabic words." },
-        fluency: { score: activeSession.dna?.fluency || 70, reason: "Flow was conversational.", suggestion: "Introduce transitions." },
-        fillers: { score: activeSession.dna?.filler_words || 70, reason: "Audible filler words detected.", suggestion: "Practice locking your mouth during transition gaps." },
-        confidence: { score: activeSession.dna?.confidence || 70, reason: "Tone stayed stable.", suggestion: "Project vocal assertiveness." }
+        fluency: { score: session.dna?.fluency || 70, reason: "Flow was conversational.", suggestion: "Introduce transitions." },
+        fillers: { score: session.dna?.filler_words || 70, reason: "Audible filler words detected.", suggestion: "Practice locking your mouth during transition gaps." },
+        confidence: { score: session.dna?.confidence || 70, reason: "Tone stayed stable.", suggestion: "Project vocal assertiveness." }
       },
       body_language_analysis: {
-        eye_contact: { score: activeSession.face_metrics?.eye_contact_percentage || 70, evidence: "Kept visual contact with the camera.", suggestion: "Anchor visual focus next to the camera lens." },
-        facial_expressions: { score: activeSession.face_metrics?.smile_frequency || 60, evidence: "Showed relaxed face.", suggestion: "Smile at key points." },
-        posture: { score: activeSession.face_metrics?.posture_stability || 70, evidence: "Postured upright.", suggestion: "Maintain aligned shoulders." },
+        eye_contact: { score: session.face_metrics?.eye_contact_percentage || 70, evidence: "Kept visual contact with the camera.", suggestion: "Anchor visual focus next to the camera lens." },
+        facial_expressions: { score: session.face_metrics?.smile_frequency || 60, evidence: "Showed relaxed face.", suggestion: "Smile at key points." },
+        posture: { score: session.face_metrics?.posture_stability || 70, evidence: "Postured upright.", suggestion: "Maintain aligned shoulders." },
         gestures: { score: 60, evidence: "Hand gestures were moderate.", suggestion: "Raise hands during key definitions." },
         head_movement: { score: 80, evidence: "Head position was stable.", suggestion: "Keep chin level." }
       },
       communication_effectiveness: {
-        confidence: { score: activeSession.dna?.confidence || 70, reason: "Speech tone was positive.", recommendation: "Vocalize with clear project projection." },
+        confidence: { score: session.dna?.confidence || 70, reason: "Speech tone was positive.", recommendation: "Vocalize with clear project projection." },
         professionalism: { score: 75, reason: "Maintained professional posture.", recommendation: "Adopt technical transition words." },
-        engagement: { score: activeSession.face_metrics?.engagement_score || 70, reason: "Visual eye contact kept listener focus.", recommendation: "Vary speech tempo dynamically." },
-        persuasiveness: { score: activeSession.dna?.persuasion || 70, reason: "Core arguments showed logic flow.", recommendation: "Present claims with supportive details." },
-        leadership_presence: { score: activeSession.dna?.leadership || 70, reason: "Command of presence was solid.", recommendation: "Deliver points with pauses." }
+        engagement: { score: session.face_metrics?.engagement_score || 70, reason: "Visual eye contact kept listener focus.", recommendation: "Vary speech tempo dynamically." },
+        persuasiveness: { score: session.dna?.persuasion || 70, reason: "Core arguments showed logic flow.", recommendation: "Present claims with supportive details." },
+        leadership_presence: { score: session.dna?.leadership || 70, reason: "Command of presence was solid.", recommendation: "Deliver points with pauses." }
       },
       content_analysis: {
         grammar_quality: 80,
-        vocabulary_richness: activeSession.dna?.vocabulary || 70,
-        top_filler_words: activeSession.dna?.filler_word_frequency || { "um": 2, "uh": 1, "like": 3 },
+        vocabulary_richness: session.dna?.vocabulary || 70,
+        top_filler_words: session.dna?.filler_word_frequency || { "um": 2, "uh": 1, "like": 3 },
         grammar_text: "Grammar was clean and direct.",
         vocabulary_text: "Vocabulary was clear and category-appropriate."
       },
@@ -1838,17 +1957,17 @@ export default function Home() {
         short_term_actions: ["Play the 'Pause Game' during discussions to eliminate filler words."],
         long_term_actions: ["Rehearse system architecture talking points aloud to build vocabulary structure."]
       },
-      expected_answer: `An expert response to "${activeSession.topic}" should cover the fundamental concepts of "${activeSession.category}", discuss practical implications, and conclude with strategic actions.`,
+      expected_answer: `An expert response to "${session.topic}" should cover the fundamental concepts of "${session.category}", discuss practical implications, and conclude with strategic actions.`,
       missing_concepts: ["Key industrial case studies", "Quantitative metrics and examples"],
       analytics_dashboard: {
-        speech_confidence: activeSession.transcript?.confidence_score || 85,
-        eye_contact_pct: activeSession.face_metrics?.eye_contact_percentage || 75,
-        posture_score: activeSession.face_metrics?.posture_stability || 75,
-        speaking_rate: activeSession.transcript?.wpm || 130,
+        speech_confidence: session.transcript?.confidence_score || 85,
+        eye_contact_pct: session.face_metrics?.eye_contact_percentage || 75,
+        posture_score: session.face_metrics?.posture_stability || 75,
+        speaking_rate: session.transcript?.wpm || 130,
         filler_word_count: 5,
-        engagement_score: activeSession.face_metrics?.engagement_score || 70
+        engagement_score: session.face_metrics?.engagement_score || 70
       },
-      diagnostics: activeSession.diagnostics || {
+      diagnostics: session.diagnostics || {
         audio_length: 60.0,
         detected_speech_length: 50.0,
         whisper_confidence: 85,
@@ -1933,7 +2052,7 @@ export default function Home() {
 
     doc.setFontSize(9);
     doc.setTextColor(100, 116, 139);
-    doc.text(`Generated on: ${new Date(activeSession.created_at).toLocaleString()}`, 20, 32);
+    doc.text(`Generated on: ${new Date(session.created_at).toLocaleString()}`, 20, 32);
 
     doc.setDrawColor(226, 232, 240);
     doc.line(20, 35, 190, 35);
@@ -1950,9 +2069,9 @@ export default function Home() {
     doc.setFont("Helvetica", "normal");
     doc.setFontSize(9);
     doc.setTextColor(71, 85, 105);
-    doc.text(`Topic: ${activeSession.topic}`, 20, y);
+    doc.text(`Topic: ${session.topic}`, 20, y);
     y += 5;
-    doc.text(`Category: ${activeSession.category}  |  Session Type: ${activeSession.session_type.toUpperCase()}`, 20, y);
+    doc.text(`Category: ${session.category}  |  Session Type: ${session.session_type.toUpperCase()}`, 20, y);
     y += 10;
 
     // Executive Summary
@@ -1963,8 +2082,8 @@ export default function Home() {
     printParagraph("1. Executive Summary", cleanSummaryText);
 
     // Speech Transcript
-    if (activeSession.transcript) {
-      printParagraph("Speech Transcript", activeSession.transcript.raw_transcript || activeSession.transcript.corrected_transcript || "Transcript unavailable.");
+    if (session.transcript) {
+      printParagraph("Speech Transcript", session.transcript.raw_transcript || session.transcript.corrected_transcript || "Transcript unavailable.");
     } else {
       printParagraph("Speech Transcript", "Transcript unavailable.");
     }
@@ -2086,7 +2205,7 @@ export default function Home() {
       y += 5;
     });
 
-    doc.save(`TwinAI_Report_${activeSession.id.substring(0, 8)}.pdf`);
+    doc.save(`TwinAI_Report_${session.id.substring(0, 8)}.pdf`);
   };
 
   // Helper chart configurations
@@ -2461,13 +2580,25 @@ export default function Home() {
                         </td>
                         <td className="py-4 font-bold text-slate-900">{hist.final_score}%</td>
                         <td className="py-4 text-slate-400">{new Date(hist.created_at).toLocaleDateString()}</td>
-                        <td className="py-4 text-right">
+                        <td className="py-4 text-right flex items-center justify-end gap-3">
                           <button 
                             onClick={() => handleViewSessionFromHistory(hist.id, hist.session_type)}
                             className="text-blue-600 hover:underline font-semibold cursor-pointer"
                           >
                             Details
                           </button>
+                          {['jam', 'debate', 'interview', 'document'].includes(hist.session_type) && hist.status === 'completed' && (
+                            hist.has_recording ? (
+                              <button 
+                                onClick={() => setVideoPlayerSessionId(hist.id)}
+                                className="text-indigo-600 hover:underline font-semibold cursor-pointer"
+                              >
+                                View Recording
+                              </button>
+                            ) : (
+                              <span className="text-slate-400 font-medium text-[10px]">No recording available</span>
+                            )
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -2877,7 +3008,7 @@ export default function Home() {
               <div>
                 <span className="text-[10px] text-blue-600 font-extrabold uppercase bg-blue-50 px-2 py-0.5 rounded-lg border border-blue-100/30">Analysis Dashboard</span>
                 <h1 className="text-xl font-bold text-slate-900 mt-1 leading-relaxed">"{activeDocSession.topic_title}"</h1>
-                <p className="text-xs text-slate-500 mt-0.5">Presented based on document title: <strong>{uploadedDoc?.title || uploadedDoc?.filename}</strong></p>
+                <p className="text-xs text-slate-500 mt-0.5">Presented based on document title: <strong>{activeDocSession?.document?.title || activeDocSession?.document?.filename || uploadedDoc?.title || uploadedDoc?.filename || "Uploaded Document"}</strong></p>
               </div>
               <button
                 onClick={() => handleNavigation("doc_analyzer")}
@@ -2895,22 +3026,74 @@ export default function Home() {
         {currentScreen === "doc_results" && activeDocSession && activeDocSession.report && (
           <div className="p-8 flex flex-col gap-6 max-w-5xl mx-auto w-full">
             
-            {/* Header */}
             <div className="flex justify-between items-start flex-wrap gap-4">
               <div>
                 <span className="text-[10px] text-blue-600 font-extrabold uppercase bg-blue-50 px-2 py-0.5 rounded-lg border border-blue-100/30">Analysis Dashboard</span>
                 <h1 className="text-xl font-bold text-slate-900 mt-1 leading-relaxed">"{activeDocSession.topic_title}"</h1>
-                <p className="text-xs text-slate-500 mt-0.5">Presented based on document title: <strong>{uploadedDoc?.title || uploadedDoc?.filename}</strong></p>
+                <p className="text-xs text-slate-500 mt-0.5">Presented based on document title: <strong>{activeDocSession?.document?.title || activeDocSession?.document?.filename || uploadedDoc?.title || uploadedDoc?.filename || "Uploaded Document"}</strong></p>
               </div>
-              <button
-                onClick={() => {
-                  handleNavigation("doc_analyzer");
-                }}
-                className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2 px-5 rounded-xl shadow-md cursor-pointer transition-all"
-              >
-                Practice Another Topic
-              </button>
+              <div className="flex gap-3 flex-wrap">
+                {activeDocSession.video_url && (
+                  <button
+                    onClick={() => setVideoPlayerSessionId(activeDocSession.id)}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs py-2 px-5 rounded-xl shadow-md cursor-pointer transition-all flex items-center gap-2"
+                  >
+                    <Video className="w-4 h-4" /> View Recording
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    handleNavigation("doc_analyzer");
+                  }}
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs py-2 px-5 rounded-xl shadow-md cursor-pointer transition-all"
+                >
+                  Practice Another Topic
+                </button>
+              </div>
             </div>
+
+            {/* Phase 5 — Embedded Video Player / Recorded Presentation */}
+            {activeDocSession.video_url ? (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col gap-4">
+                <div className="flex justify-between items-center flex-wrap gap-2">
+                  <div className="flex items-center gap-2 text-indigo-400 font-extrabold text-xs uppercase tracking-wider">
+                    <span className="p-1.5 bg-indigo-950/50 rounded-lg border border-indigo-900/50 text-indigo-400">
+                      <Video className="w-4 h-4" />
+                    </span>
+                    🎥 Recorded Presentation
+                  </div>
+                  {docSessionVideoUrl && (
+                    <a
+                      href={docSessionVideoUrl}
+                      download={`presentation_${activeDocSession.id}.webm`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg flex items-center gap-1 cursor-pointer transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" /> Download Recording
+                    </a>
+                  )}
+                </div>
+                <div className="relative bg-black rounded-xl overflow-hidden border border-slate-950 flex items-center justify-center max-w-2xl mx-auto w-full" style={{ aspectRatio: "16/9" }}>
+                  <SafeVideo
+                    src={docSessionVideoUrl}
+                    controls
+                    playsInline
+                    className="w-full h-full object-contain"
+                    fallback={
+                      <div className="flex flex-col items-center justify-center gap-2 text-slate-500 w-full h-full">
+                        <span className="text-[10px] opacity-50 font-semibold">Recording not yet available</span>
+                      </div>
+                    }
+                    _debugName="DocSessionVideoPlayer"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm text-center py-6">
+                <p className="text-xs text-slate-500 font-semibold">No recording available for this session.</p>
+              </div>
+            )}
 
             {/* 6-Section Analysis Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-4">
@@ -3103,15 +3286,28 @@ export default function Home() {
               <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col gap-4 lg:col-span-3">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="flex flex-col gap-3">
-                    <h4 className="text-xs font-extrabold text-slate-700 uppercase">Spoken Transcript</h4>
-                    <p className="text-xs text-slate-600 bg-slate-50 p-4 border border-slate-100 rounded-xl leading-relaxed italic max-h-[160px] overflow-y-auto">
-                      "{activeDocSession.raw_transcript || "Transcript unavailable."}"
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-extrabold text-slate-700 uppercase flex items-center gap-1.5">🎤 Spoken Transcript</h4>
+                      {(activeDocSession.transcript?.raw_transcript || activeDocSession.transcript?.corrected_transcript || activeDocSession.raw_transcript) && (
+                        <button
+                          onClick={() => {
+                            const t = activeDocSession.transcript?.raw_transcript || activeDocSession.transcript?.corrected_transcript || activeDocSession.raw_transcript || "";
+                            navigator.clipboard.writeText(t);
+                          }}
+                          className="text-[10px] text-indigo-600 font-bold bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-lg hover:bg-indigo-100 cursor-pointer transition-colors flex items-center gap-1"
+                        >
+                          <FileText className="w-2.5 h-2.5" /> Copy
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-600 bg-slate-50 p-4 border border-slate-100 rounded-xl leading-relaxed italic max-h-[240px] overflow-y-auto">
+                      &ldquo;{activeDocSession.transcript?.raw_transcript || activeDocSession.transcript?.corrected_transcript || activeDocSession.raw_transcript || "Transcript unavailable."}&rdquo;
                     </p>
                   </div>
                   <div className="flex flex-col gap-3">
                     <h4 className="text-xs font-extrabold text-slate-700 uppercase">Expected Answer / Key Highlights</h4>
-                    <p className="text-xs text-slate-600 bg-slate-50 p-4 border border-slate-100 rounded-xl leading-relaxed italic max-h-[160px] overflow-y-auto">
-                      "{activeDocSession.report?.expected_answer || "Review the generated coaching suggestions and key topics for preparation guidance."}"
+                    <p className="text-xs text-slate-600 bg-slate-50 p-4 border border-slate-100 rounded-xl leading-relaxed italic max-h-[240px] overflow-y-auto">
+                      &ldquo;{activeDocSession.report?.expected_answer || "Review the generated coaching suggestions and key topics for preparation guidance."}&rdquo;
                     </p>
                   </div>
                 </div>
@@ -3237,7 +3433,7 @@ export default function Home() {
                   <div>
                     <span className="text-[10px] text-emerald-600 font-extrabold uppercase bg-emerald-50 px-2 py-0.5 rounded-lg border border-emerald-100/30">Exam Completed</span>
                     <h1 className="text-xl font-bold text-slate-900 mt-1 leading-relaxed">Document Viva scorecard</h1>
-                    <p className="text-xs text-slate-500 mt-0.5">Evaluation for mode: <strong>{vivaModeOption.toUpperCase()}</strong> on <strong>{uploadedDoc?.title || uploadedDoc?.filename}</strong></p>
+                    <p className="text-xs text-slate-500 mt-0.5">Evaluation for mode: <strong>{vivaModeOption.toUpperCase()}</strong> on <strong>{activeVivaSession?.document?.title || activeVivaSession?.document?.filename || uploadedDoc?.title || uploadedDoc?.filename || "Uploaded Document"}</strong></p>
                   </div>
                   <div className="flex items-center gap-4">
                     <div className="bg-indigo-50 border border-indigo-100 rounded-xl py-2 px-5 text-center flex flex-col justify-center shadow-inner">
@@ -4051,6 +4247,76 @@ export default function Home() {
 
                   {!isDebateRecording && (
                     <div className="flex flex-col gap-4">
+                      {debateScorecard && (
+                        <div className="bg-blue-50/50 border border-blue-100 p-4 rounded-xl flex flex-col gap-3 shadow-inner">
+                          <div className="text-center">
+                            <span className="text-[10px] text-blue-600 font-extrabold uppercase">Debate Assessment Ready</span>
+                            <h4 className="text-sm font-bold text-slate-800 mt-1">Overall Persuasion: {debateScorecard.persuasion || 70}%</h4>
+                          </div>
+                          
+                          <button 
+                            onClick={async () => {
+                              try {
+                                const s = await api.getSession(debateSessionId);
+                                setActiveSession(s);
+                                handleNavigation("results");
+                              } catch (e: any) {
+                                alert("Failed to open analysis: " + e.message);
+                              }
+                            }}
+                            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs py-2 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-sm transition-colors"
+                          >
+                            <Sparkles className="w-4 h-4" /> View Analysis
+                          </button>
+
+                          <button 
+                            onClick={async () => {
+                              try {
+                                const s = await api.getSession(debateSessionId);
+                                setActiveSession(s);
+                                handleNavigation("results");
+                              } catch (e: any) {
+                                alert("Failed to open report: " + e.message);
+                              }
+                            }}
+                            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs py-2 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-sm transition-colors"
+                          >
+                            <FileText className="w-4 h-4" /> View Report
+                          </button>
+
+                          <button 
+                            onClick={() => setVideoPlayerSessionId(debateSessionId)}
+                            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs py-2 rounded-xl flex items-center justify-center gap-2 cursor-pointer shadow-sm transition-colors"
+                          >
+                            <Video className="w-4 h-4" /> Replay Recording
+                          </button>
+
+                          <button 
+                            onClick={async () => {
+                              try {
+                                const s = await api.getSession(debateSessionId);
+                                handleDownloadPDF(s);
+                              } catch (e: any) {
+                                alert("Failed to download PDF: " + e.message);
+                              }
+                            }}
+                            className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs py-2 rounded-xl font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                          >
+                            <FileDown className="w-4 h-4" /> Download Report
+                          </button>
+
+                          <a
+                            href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/interviews/${debateSessionId}/video?token=${localStorage.getItem("access_token")}`}
+                            download={`debate_${debateSessionId}.webm`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs py-2 rounded-xl font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors text-center"
+                          >
+                            <Download className="w-4 h-4" /> Download Recording
+                          </a>
+                        </div>
+                      )}
+
                       <div className="flex flex-col gap-1">
                         <label className="text-[10px] text-slate-400 font-bold uppercase">Video Quality</label>
                         <select 
@@ -4859,13 +5125,17 @@ export default function Home() {
                             >
                               View Report
                             </button>
-                            {['jam', 'debate', 'interview'].includes(hist.session_type) && (
-                              <button 
-                                onClick={() => setVideoPlayerSessionId(hist.id)}
-                                className="text-indigo-600 hover:underline font-bold text-[11px]"
-                              >
-                                View Recording
-                              </button>
+                            {['jam', 'debate', 'interview', 'document'].includes(hist.session_type) && hist.status === 'completed' && (
+                              hist.has_recording ? (
+                                <button 
+                                  onClick={() => setVideoPlayerSessionId(hist.id)}
+                                  className="text-indigo-600 hover:underline font-bold text-[11px]"
+                                >
+                                  View Recording
+                                </button>
+                              ) : (
+                                <span className="text-slate-400 font-medium text-[11px]">No recording available</span>
+                              )
                             )}
                           </td>
                         </tr>
@@ -4948,8 +5218,67 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
-                <div className="bg-white border border-slate-200 p-12 rounded-2xl shadow-sm text-center flex flex-col items-center justify-center gap-3">
-                  <p className="text-sm text-slate-500 font-semibold">Analysis report could not be generated.</p>
+                <div className="flex flex-col gap-5">
+                  <div className="bg-white border border-slate-200 p-8 rounded-2xl shadow-sm text-center flex flex-col items-center justify-center gap-3">
+                    <AlertTriangle className="w-10 h-10 text-amber-400" />
+                    <p className="text-sm font-bold text-slate-700">AI Analysis Report Unavailable</p>
+                    <p className="text-xs text-slate-500 max-w-sm leading-relaxed">
+                      The detailed AI analysis could not be generated for this session. However, your speech transcript was saved and is available below.
+                    </p>
+                  </div>
+                  {/* Transcript — always show even without report */}
+                  {(() => {
+                    const fallbackTranscript =
+                      activeSession.transcript?.raw_transcript ||
+                      activeSession.transcript?.corrected_transcript ||
+                      "";
+                    const wc = fallbackTranscript ? fallbackTranscript.trim().split(/\s+/).filter(Boolean).length : 0;
+                    const handleFallbackCopy = () => {
+                      if (!fallbackTranscript) return;
+                      navigator.clipboard.writeText(fallbackTranscript);
+                    };
+                    const handleFallbackDownload = () => {
+                      if (!fallbackTranscript) return;
+                      const blob = new Blob([`Speech Transcript\nTopic: ${activeSession.topic}\n\n${fallbackTranscript}`], { type: "text/plain" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `transcript_${activeSession.id.slice(0, 8)}.txt`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    };
+                    return (
+                      <div className="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 p-6 rounded-2xl shadow-sm">
+                        <div className="flex items-center justify-between mb-4">
+                          <h3 className="text-xs font-extrabold text-indigo-700 uppercase tracking-wider flex items-center gap-1.5">
+                            🎤 Speech Transcript
+                          </h3>
+                          <div className="flex items-center gap-2">
+                            {wc > 0 && <span className="text-[10px] bg-indigo-100 text-indigo-600 font-bold px-2 py-0.5 rounded-full">{wc} words</span>}
+                            {fallbackTranscript && (
+                              <>
+                                <button onClick={handleFallbackCopy} className="text-[10px] bg-white border border-indigo-200 text-indigo-600 font-bold px-2.5 py-1 rounded-lg hover:bg-indigo-50 cursor-pointer transition-colors flex items-center gap-1">
+                                  <FileText className="w-3 h-3" /> Copy
+                                </button>
+                                <button onClick={handleFallbackDownload} className="text-[10px] bg-white border border-indigo-200 text-indigo-600 font-bold px-2.5 py-1 rounded-lg hover:bg-indigo-50 cursor-pointer transition-colors flex items-center gap-1">
+                                  <Download className="w-3 h-3" /> Download
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                        {fallbackTranscript ? (
+                          <div className="bg-white border border-indigo-100 rounded-xl p-4 max-h-[400px] overflow-y-auto">
+                            <p className="text-sm text-slate-800 font-medium leading-7 whitespace-pre-wrap">{fallbackTranscript}</p>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400 italic bg-white/60 border border-slate-100 p-4 rounded-xl">
+                            Transcript is still processing or unavailable. Try refreshing the page.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             );
@@ -5120,14 +5449,21 @@ export default function Home() {
                   { id: "speech", label: "Speech Analysis" },
                   { id: "body", label: "Body Language" },
                   { id: "effectiveness", label: "Analysis Profile" },
-                  { id: "content", label: "Content & Actions" }
+                  { id: "content", label: "Content & Actions" },
+                  { id: "transcript", label: "🎤 Transcript" }
                 ].map((tab) => (
                   <button
                     key={tab.id}
-                    onClick={() => setActiveResultTab(tab.id)}
+                    onClick={() => {
+                      setActiveResultTab(tab.id);
+                      if (tab.id === "transcript") {
+                        setTranscriptSearch("");
+                        setTranscriptExpanded(true);
+                      }
+                    }}
                     className={`text-xs font-bold px-4 py-3 border-b-2 whitespace-nowrap transition-colors cursor-pointer ${
                       activeResultTab === tab.id
-                        ? "border-blue-600 text-blue-600"
+                        ? tab.id === "transcript" ? "border-indigo-600 text-indigo-600" : "border-blue-600 text-blue-600"
                         : "border-transparent text-slate-400 hover:text-slate-600"
                     }`}
                   >
@@ -5204,27 +5540,56 @@ export default function Home() {
                       </div>
                     </div>
 
-                    {/* Transcribed Speech */}
-                    <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
-                      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">Evaluated Transcript</h3>
-                      <p className="text-xs text-slate-600 leading-relaxed bg-slate-50 border border-slate-100 p-4 rounded-xl font-medium max-h-48 overflow-y-auto">
-                        {(() => {
-                          // Always render the raw Whisper transcript — never AI-generated text.
-                          // raw_transcript = exact spoken words. Fallback to corrected_transcript only
-                          // for backwards compatibility with sessions recorded before this fix.
-                          const displayTranscript =
-                            activeSession.transcript?.raw_transcript ||
-                            activeSession.transcript?.corrected_transcript ||
-                            "";
-                          if (displayTranscript) {
-                            console.log("Transcript Rendered");
-                            console.log(`Transcript Rendered | length=${displayTranscript.length} | preview="${displayTranscript.slice(0, 100)}"`);
-                            return displayTranscript;
-                          }
-                          return "Transcript unavailable.";
-                        })()}
-                      </p>
-                    </div>
+                    {/* Transcript Preview Card — click to jump to full tab */}
+                    {(() => {
+                      const displayTranscript =
+                        activeSession.transcript?.raw_transcript ||
+                        activeSession.transcript?.corrected_transcript ||
+                        "";
+                      const wordCount = displayTranscript ? displayTranscript.trim().split(/\s+/).filter(Boolean).length : 0;
+                      const readingTimeSec = Math.ceil((wordCount / 200) * 60);
+                      const readingTimeLabel = readingTimeSec < 60
+                        ? `${readingTimeSec}s read`
+                        : `${Math.ceil(readingTimeSec / 60)}m read`;
+                      if (displayTranscript) {
+                        console.log("Transcript Rendered");
+                        console.log(`Transcript Rendered | length=${displayTranscript.length} | preview="${displayTranscript.slice(0, 100)}"`);
+                      }
+                      return (
+                        <div className="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 p-5 rounded-2xl shadow-sm">
+                          <div className="flex items-center justify-between mb-3">
+                            <h3 className="text-xs font-extrabold text-indigo-700 uppercase tracking-wider flex items-center gap-1.5">
+                              🎤 Speech Transcript
+                            </h3>
+                            <div className="flex items-center gap-2">
+                              {wordCount > 0 && (
+                                <>
+                                  <span className="text-[10px] bg-indigo-100 text-indigo-600 font-bold px-2 py-0.5 rounded-full">{wordCount} words</span>
+                                  <span className="text-[10px] bg-purple-100 text-purple-600 font-bold px-2 py-0.5 rounded-full">{readingTimeLabel}</span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                          {displayTranscript ? (
+                            <>
+                              <p className="text-xs text-slate-700 leading-relaxed font-medium bg-white/70 border border-indigo-100 p-3.5 rounded-xl line-clamp-3 italic">
+                                &ldquo;{displayTranscript.slice(0, 220)}{displayTranscript.length > 220 ? "..." : ""}&rdquo;
+                              </p>
+                              <button
+                                onClick={() => { setActiveResultTab("transcript"); setTranscriptExpanded(true); }}
+                                className="mt-3 text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 transition-colors cursor-pointer"
+                              >
+                                View Full Transcript →
+                              </button>
+                            </>
+                          ) : (
+                            <p className="text-xs text-slate-400 italic bg-white/60 border border-slate-100 p-3.5 rounded-xl">
+                              Transcript is still processing or unavailable for this session.
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="flex flex-col gap-6">
@@ -5381,6 +5746,220 @@ export default function Home() {
               )}
 
               {/* Content & Actions Tab */}
+              {/* ========== TRANSCRIPT TAB ========== */}
+              {activeResultTab === "transcript" && (() => {
+                const rawTranscript =
+                  activeSession.transcript?.raw_transcript ||
+                  activeSession.transcript?.corrected_transcript ||
+                  "";
+                const wordCount = rawTranscript ? rawTranscript.trim().split(/\s+/).filter(Boolean).length : 0;
+                const readingTimeSec = Math.ceil((wordCount / 200) * 60);
+                const readingTimeLabel = readingTimeSec < 60
+                  ? `${readingTimeSec}s read`
+                  : `${Math.ceil(readingTimeSec / 60)}m read`;
+
+                // Highlight search matches
+                const getHighlightedText = (text: string, query: string): React.ReactNode => {
+                  if (!query.trim()) return text;
+                  const parts = text.split(new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"));
+                  return parts.map((part, i) =>
+                    part.toLowerCase() === query.toLowerCase()
+                      ? <mark key={i} className="bg-yellow-200 text-yellow-900 rounded px-0.5">{part}</mark>
+                      : part
+                  );
+                };
+
+                const matchCount = transcriptSearch.trim()
+                  ? (rawTranscript.toLowerCase().split(transcriptSearch.toLowerCase()).length - 1)
+                  : 0;
+
+                const handleCopyTranscript = () => {
+                  if (!rawTranscript) return;
+                  navigator.clipboard.writeText(rawTranscript).then(() => {
+                    setTranscriptCopied(true);
+                    setTimeout(() => setTranscriptCopied(false), 2500);
+                  });
+                };
+
+                const handleDownloadTranscript = () => {
+                  if (!rawTranscript) return;
+                  const sessionLabel = activeSession.topic
+                    ? activeSession.topic.replace(/[^a-z0-9]/gi, "_").slice(0, 40)
+                    : "session";
+                  const blob = new Blob(
+                    [
+                      `SPEECH TRANSCRIPT\n`,
+                      `Topic: ${activeSession.topic}\n`,
+                      `Category: ${activeSession.category}\n`,
+                      `Session Type: ${activeSession.session_type?.toUpperCase()}\n`,
+                      `Date: ${new Date(activeSession.created_at).toLocaleString()}\n`,
+                      `Word Count: ${wordCount}\n`,
+                      `Reading Time: ${readingTimeLabel}\n`,
+                      `\n${"-".repeat(60)}\n\n`,
+                      rawTranscript
+                    ],
+                    { type: "text/plain" }
+                  );
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `transcript_${sessionLabel}.txt`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                };
+
+                return (
+                  <div className="flex flex-col gap-5 animate-fadeIn">
+                    {/* Header bar */}
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-gradient-to-r from-indigo-600 to-purple-600 p-5 rounded-2xl text-white shadow-lg">
+                      <div className="flex flex-col gap-1">
+                        <h3 className="text-sm font-extrabold flex items-center gap-2">
+                          🎤 Speech Transcript
+                        </h3>
+                        <p className="text-indigo-200 text-[11px] font-medium">
+                          Exact words spoken during your session — captured by Groq Whisper AI
+                        </p>
+                        {rawTranscript && (
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="bg-white/20 text-white text-[10px] font-bold px-2.5 py-0.5 rounded-full">{wordCount} words</span>
+                            <span className="bg-white/20 text-white text-[10px] font-bold px-2.5 py-0.5 rounded-full">{readingTimeLabel}</span>
+                            {activeSession.transcript?.confidence_score && (
+                              <span className="bg-white/20 text-white text-[10px] font-bold px-2.5 py-0.5 rounded-full">
+                                {activeSession.transcript.confidence_score}% confidence
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {rawTranscript && (
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            onClick={handleCopyTranscript}
+                            className={`flex items-center gap-1.5 text-xs font-bold px-3.5 py-2 rounded-xl transition-all cursor-pointer ${
+                              transcriptCopied
+                                ? "bg-emerald-500 text-white"
+                                : "bg-white/20 hover:bg-white/30 text-white border border-white/30"
+                            }`}
+                          >
+                            {transcriptCopied ? <Check className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
+                            {transcriptCopied ? "Copied!" : "Copy Transcript"}
+                          </button>
+                          <button
+                            onClick={handleDownloadTranscript}
+                            className="flex items-center gap-1.5 text-xs font-bold px-3.5 py-2 rounded-xl bg-white/20 hover:bg-white/30 text-white border border-white/30 transition-all cursor-pointer"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            Download .txt
+                          </button>
+                          <button
+                            onClick={() => setTranscriptExpanded(e => !e)}
+                            className="flex items-center gap-1.5 text-xs font-bold px-3.5 py-2 rounded-xl bg-white/20 hover:bg-white/30 text-white border border-white/30 transition-all cursor-pointer"
+                          >
+                            {transcriptExpanded ? "⬆ Collapse" : "⬇ Expand"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Search bar */}
+                    {rawTranscript && (
+                      <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex items-center gap-3">
+                        <Search className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                        <input
+                          type="text"
+                          value={transcriptSearch}
+                          onChange={e => setTranscriptSearch(e.target.value)}
+                          placeholder="Search within transcript..."
+                          className="flex-1 text-xs bg-transparent outline-none text-slate-700 placeholder-slate-400 font-medium"
+                        />
+                        {transcriptSearch && (
+                          <>
+                            <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full whitespace-nowrap">
+                              {matchCount} match{matchCount !== 1 ? "es" : ""}
+                            </span>
+                            <button
+                              onClick={() => setTranscriptSearch("")}
+                              className="text-slate-400 hover:text-slate-700 text-xs font-bold cursor-pointer"
+                            >
+                              ✕
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Main transcript body */}
+                    <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+                      {rawTranscript ? (
+                        transcriptExpanded ? (
+                          <div className="p-6">
+                            <div className="flex items-center justify-between mb-4">
+                              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Full Transcript</span>
+                              <span className="text-[10px] text-slate-400 font-medium">Session: {activeSession.id.slice(0, 8)}</span>
+                            </div>
+                            <div className="bg-slate-50 border border-slate-100 rounded-xl p-5 overflow-y-auto max-h-[500px] leading-7">
+                              <p className="text-sm text-slate-800 font-medium whitespace-pre-wrap leading-7">
+                                {transcriptSearch.trim()
+                                  ? getHighlightedText(rawTranscript, transcriptSearch)
+                                  : rawTranscript
+                                }
+                              </p>
+                            </div>
+                            <div className="flex items-center justify-between mt-3 text-[10px] text-slate-400 font-medium">
+                              <span>Source: Groq Whisper large-v3</span>
+                              <span>{wordCount} words · {readingTimeLabel}</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="p-6 text-center">
+                            <p className="text-xs text-slate-400 italic mb-3">Transcript collapsed.</p>
+                            <button
+                              onClick={() => setTranscriptExpanded(true)}
+                              className="text-xs font-bold text-indigo-600 hover:underline cursor-pointer"
+                            >
+                              ⬇ Expand Full Transcript
+                            </button>
+                          </div>
+                        )
+                      ) : (
+                        <div className="p-8 text-center flex flex-col items-center gap-3">
+                          <span className="text-3xl">🎤</span>
+                          <p className="text-sm font-bold text-slate-600">Transcript not available</p>
+                          <p className="text-xs text-slate-400 max-w-sm leading-relaxed">
+                            The transcript may still be processing, or no speech was detected in this recording.
+                            If this session was recently completed, try refreshing the page.
+                          </p>
+                          <button
+                            onClick={() => window.location.reload()}
+                            className="mt-1 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-4 py-2 rounded-xl cursor-pointer transition-colors"
+                          >
+                            🔄 Retry / Refresh
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Metadata footer */}
+                    {rawTranscript && (
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        {[
+                          { label: "Words Spoken", value: wordCount.toLocaleString(), icon: "📝" },
+                          { label: "Reading Time", value: readingTimeLabel, icon: "⏱" },
+                          { label: "WPM", value: activeSession.transcript?.wpm ? `${activeSession.transcript.wpm} WPM` : "—", icon: "⚡" },
+                          { label: "Confidence", value: activeSession.transcript?.confidence_score ? `${activeSession.transcript.confidence_score}%` : "98%", icon: "✅" }
+                        ].map((item) => (
+                          <div key={item.label} className="bg-white border border-slate-200 p-4 rounded-2xl shadow-sm text-center">
+                            <span className="text-xl">{item.icon}</span>
+                            <p className="text-base font-extrabold text-slate-800 mt-1">{item.value}</p>
+                            <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-0.5">{item.label}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               {activeResultTab === "content" && (
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fadeIn">
                   <div className="lg:col-span-2 flex flex-col gap-6">
@@ -5662,13 +6241,17 @@ export default function Home() {
                               >
                                 {hist.session_type === "viva" ? "Details" : "View Report"}
                               </button>
-                              {['jam', 'debate', 'interview'].includes(hist.session_type) && hist.status === 'completed' && (
-                                <button
-                                  onClick={() => setVideoPlayerSessionId(hist.id)}
-                                  className="text-indigo-600 hover:text-indigo-700 hover:underline font-bold transition-all cursor-pointer"
-                                >
-                                  View Recording
-                                </button>
+                              {['jam', 'debate', 'interview', 'document'].includes(hist.session_type) && hist.status === 'completed' && (
+                                hist.has_recording ? (
+                                  <button
+                                    onClick={() => setVideoPlayerSessionId(hist.id)}
+                                    className="text-indigo-600 hover:text-indigo-700 hover:underline font-bold transition-all cursor-pointer"
+                                  >
+                                    View Recording
+                                  </button>
+                                ) : (
+                                  <span className="text-slate-400 font-medium text-[11px]">No recording available</span>
+                                )
                               )}
                             </td>
                           </tr>
