@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ai-communication-coach-backend
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: TOPIC_GENERATOR_MODEL
+        value: llama-3.3-70b-versatile
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        value: sqlite:///./jam_analyzer.db
+      - key: ALLOWED_ORIGINS
+        value: https://*.vercel.app

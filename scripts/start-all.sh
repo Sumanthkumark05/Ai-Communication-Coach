@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Ensure local binaries (node, npm, uv) are in PATH
+export PATH="$HOME/.local/bin:$PATH"
+
 # Port definitions
 FRONTEND_PORT=3000
 BACKEND_PORT=8000

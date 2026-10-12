@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     OPENAI_KEY: str = ""
     PINECONE_API_KEY: str = ""
     PINECONE_INDEX_NAME: str = "communication-twin"
+    ALLOWED_ORIGINS: str = ""
 
     class Config:
         env_file = ".env"

@@ -123,16 +123,22 @@ app = FastAPI(
 )
 
 # Configure CORS for Frontend communication
-# Supports both localhost and 127.0.0.1 on ports 3000 and 3001 to eliminate
-# origin mismatches regardless of how the browser resolves the loopback address.
+# Supports localhost, custom domains from ALLOWED_ORIGINS, and *.vercel.app preview/production domains
+default_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+env_origins = [
+    o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()
+] if getattr(settings, "ALLOWED_ORIGINS", "") else []
+allowed_origins = list(dict.fromkeys(default_origins + env_origins))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -163,7 +169,8 @@ async def warmup_models():
     def _validate_groq():
         key = settings.GROQ_API_KEY
         if not key:
-            raise RuntimeError("GROQ_API_KEY is not set in environment or .env. Startup aborted.")
+            logger.warning("[Startup][GROQ] ⚠️ GROQ_API_KEY is not set. Speech transcription & AI evaluations will require GROQ_API_KEY.")
+            return
         
         try:
             from app.services.groq_service import GroqService
@@ -172,11 +179,11 @@ async def warmup_models():
             if "OK" in res or len(res.strip()) > 0:
                 logger.info("[Startup][GROQ] ✓ API key valid. Primary model (openai/gpt-oss-120b) responds correctly.")
             else:
-                raise RuntimeError("Groq API validation failed: Empty response or failed validation.")
+                logger.warning("[Startup][GROQ] ⚠️ Groq API responded with empty text.")
         except Exception as e:
-            raise RuntimeError(f"Groq API startup validation failed: {e}") from e
+            logger.warning(f"[Startup][GROQ] ⚠️ Groq API startup validation warning: {e}")
 
-    # Run validation synchronously to prevent silent failures on startup
+    # Run validation
     _validate_groq()
 
     # ── 2. Faster-Whisper Warm-up ─────────────────────────────────────────────
@@ -364,4 +371,5 @@ def debug_system():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
